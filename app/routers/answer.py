@@ -1,74 +1,16 @@
 """
 OCS网课助手答题API路由
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 from typing import Optional
-from app.schemas.answer import QuestionRequest, AnswerResponse, OCSQuestionContext
+from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
 from app.utils.answer_processor import process_question_with_multi_layer
 from app.utils.logger import logger
 
 router = APIRouter()
 
-@router.post("/answer", response_model=AnswerResponse)
-async def get_answer(request: dict):
-    """
-    获取问题答案 - 支持题库-数据库-AI多层查询
-    兼容OCS AnswererWrapper格式的请求
-    """
-    try:
-        # 从请求中提取参数，兼容多种格式
-        question = request.get("question", "")
-        question_type = request.get("question_type", "single")
-        options = request.get("options", "")
-        use_ai = request.get("use_ai", True)
-        use_question_bank = request.get("use_question_bank", True)
-        
-        # 验证输入
-        if not question:
-            raise HTTPException(status_code=400, detail="问题内容不能为空")
-        
-        if len(question) > settings.MAX_QUESTION_LENGTH:
-            raise HTTPException(status_code=400, detail="问题长度超出限制")
-        
-        # 构建OCS兼容的上下文
-        question_context = OCSQuestionContext(
-            title=question,
-            type=question_type,
-            options=options
-        )
-        
-        logger.info(f"开始处理问题: {question}, 类型: {question_type}, 选项: {options}")
-        
-        # 使用多层查询架构获取答案
-        result = await process_question_with_multi_layer(
-            question_context=question_context,
-            use_ai=use_ai,
-            use_question_bank=use_question_bank,
-            use_database=True  # 总是启用数据库查询作为中间层
-        )
-        
-        if result is None:
-            logger.warning(f"所有查询方式都失败，返回默认答案: {question}")
-            return AnswerResponse(
-                question=question,
-                answer="未找到答案",
-                source="none",
-                confidence=0
-            )
-        
-        logger.info(f"成功获取答案，来源: {result['source']}, 问题: {question}")
-        
-        return AnswerResponse(
-            question=question,
-            answer=result['answer'],
-            source=result['source'],
-            confidence=result['confidence']
-        )
-        
-    except Exception as e:
-        logger.error(f"处理问题时出错: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"处理问题时出错: {str(e)}")
+
 
 @router.get("/health")
 @router.head("/health")

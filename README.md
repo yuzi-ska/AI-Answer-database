@@ -2,37 +2,22 @@
 
 基于AI、数据库和题库的智能答题API，兼容OCS网课助手的AnswererWrapper接口。
 
+## 使用须知
+
+1. **本项目不允许进行商业盈利行为，答案根据所使用AI存在较大波动。**
+2. **请使用者遵守相关规定，不进行作弊等行为**
+
 ## 功能特点
 
-- AI、数据库+题库混合答题
+- AI+题库混合答题
 - 支持OpenAI兼容接口（OpenAI、DeepSeek、通义千问等）
-- 兼容OCS AnswererWrapper接口
-- 支持GET和POST两种请求方式
+- 完全兼容OCS AnswererWrapper接口
+- 支持GET请求方式
 - 异步高并发处理
 - 本地SQLite数据库存储
 - 灵活的缓存方案（内存/Redis）
 - 可配置的API版本和响应格式
 - 统一的响应格式标准
-
-## 缓存方案对比
-
-### 内存缓存（默认）
-- ✅ 无需额外服务
-- ✅ 配置简单
-- ❌ 服务重启后缓存丢失
-- ❌ 多实例无法共享缓存
-
-### Redis缓存
-- ✅ 持久化存储
-- ✅ 多实例共享缓存
-- ✅ 支持集群部署
-- ✅ 更高的缓存性能
-- ❌ 需要Redis服务
-- ❌ 配置稍复杂
-
-## 查询优先级
-
-1. 缓存 → 2. 本地数据库 → 3. OCS题库 → 4. AI模型
 
 ## 安装和运行
 
@@ -60,7 +45,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 DATABASE_URL=sqlite:///./ocs_api.db
 
 # AI模型（OpenAI兼容接口）
-AI_MODEL_API_KEY=your-api-key
+AI_MODEL_API_KEY=your-api-key-here
 AI_MODEL_PROVIDER=openai
 AI_MODEL_NAME=gpt-3.5-turbo
 AI_MODEL_BASE_URL=https://api.openai.com/v1
@@ -74,6 +59,13 @@ AI_MODEL_BASE_URL=https://api.openai.com/v1
 # AI_MODEL_PROVIDER=custom
 # AI_MODEL_NAME=qwen-plus
 # AI_MODEL_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+
+# OCS题库配置
+# 单个题库配置示例
+# QUESTION_BANK_CONFIG=[{"url":"https://api.example.com/search?q=${title}","name":"示例题库","method":"get","contentType":"json","handler":"return (res)=> res.code === 200 ? [res.data.question, res.data.answer] : undefined"}]
+
+# 多个题库配置示例（取消注释使用）
+# QUESTION_BANK_CONFIG=[{"url":"https://api.xinghuo.com/search?q=${title}","name":"星火题库","method":"get","contentType":"json","headers":{"Authorization":"Bearer your-api-key"},"handler":"return (res)=> res.code === 200 ? [res.data.question, res.data.answer] : undefined"},{"url":"https://api.xueersi.com/v1/question/search","name":"学而思题库","method":"post","contentType":"json","data":{"question":"${title}","type":"${type}"},"headers":{"X-API-Key":"your-api-key"},"handler":"return (res)=> res.status === 'success' && res.data ? [res.data.question, res.data.answer] : undefined"}]
 
 # 缓存配置
 # 使用内存缓存（默认）
@@ -104,8 +96,6 @@ ENABLE_REDOC=true
 # 响应配置
 RESPONSE_CODE_SUCCESS=1
 RESPONSE_CODE_ERROR=0
-RESPONSE_MSG_SUCCESS=成功
-RESPONSE_MSG_ERROR=失败
 ```
 
 ## API接口
@@ -129,22 +119,6 @@ RESPONSE_MSG_ERROR=失败
       "answer": "A"
     }
   ]
-}
-```
-
-### POST答案接口
-
-**POST** `/api/v1/answer`
-
-兼容OCS AnswererWrapper格式，支持灵活的请求参数：
-
-```json
-{
-  "question": "问题内容",
-  "question_type": "single",
-  "options": "A.选项1\nB.选项2",
-  "use_ai": true,
-  "use_question_bank": true
 }
 ```
 
@@ -205,6 +179,65 @@ RESPONSE_MSG_ERROR=失败
 - 多选题：`answer` 包含多个选项字母，用#分隔
 - 其他题型：`answer` 包含完整答案文本
 
+## 查询优先级
+
+系统按以下优先级查询答案：
+1. **缓存** - 最快响应
+2. **本地数据库** - 历史AI答案和手动添加的题目
+3. **OCS题库** - 外部题库接口
+4. **AI模型** - 最后的答案来源
+
+AI生成的答案会自动保存到本地数据库，供后续查询使用。
+
+## 缓存方案对比
+
+### 内存缓存（默认）
+- ✅ 无需额外服务
+- ✅ 配置简单
+- ❌ 服务重启后缓存丢失
+- ❌ 多实例无法共享缓存
+
+### Redis缓存
+- ✅ 持久化存储
+- ✅ 多实例共享缓存
+- ✅ 支持集群部署
+- ✅ 更高的缓存性能
+- ❌ 需要Redis服务
+- ❌ 配置稍复杂
+
+## OCS题库配置格式
+
+### 基本格式
+
+```json
+[
+  {
+    "url": "http://localhost:8000/api/search?q=${title}",
+    "name": "本地题库",
+    "method": "get",
+    "contentType": "json",
+    "handler": "return (res)=> res.code === 1 && res.results.length > 0 ? [res.results[0].question, res.results[0].answer] : undefined"
+  }
+]
+```
+
+### 字段说明
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| url | string | 是 | 请求URL，支持占位符 |
+| name | string | 是 | 题库名称 |
+| handler | string | 是 | JavaScript处理函数 |
+| method | string | 否 | get/post，默认get |
+| contentType | string | 否 | json/text，默认json |
+
+### Handler函数
+
+返回格式：
+- 单个结果：`[题目, 答案]`
+- 多个结果：`[[题目1, 答案1], [题目2, 答案2]]`
+- 无结果：`undefined`
+
 ## OCS网课助手配置
 
 ### 推荐配置（使用搜索接口）
@@ -213,25 +246,17 @@ RESPONSE_MSG_ERROR=失败
 [{"url": "http://localhost:8000/api/search?q=${title}&type=${type}&options=${options}", "name": "OCS AI+题库API", "method": "get", "contentType": "json", "handler": "return (res)=> res.code === 1 && res.results.length > 0 ? [res.results[0].question, res.results[0].answer] : undefined"}]
 ```
 
-### 备选配置（使用POST接口）
-
-```json
-[{"url": "http://localhost:8000/api/v1/answer", "name": "OCS AI+题库API", "data": {"question": "${title}", "question_type": "${type}", "options": "${options}", "use_ai": true, "use_question_bank": true}, "method": "post", "contentType": "json", "handler": "return (res) => res.answer ? [res.question, res.answer] : undefined"}]
-```
-
 ## API测试
 
 ```bash
 # 测试搜索接口
 curl "http://localhost:8000/api/search?q=1+1等于几&type=single&options=A.1 B.2 C.3 D.4"
 
-# 测试POST接口
-curl -X POST http://localhost:8000/api/v1/answer \
-  -H "Content-Type: application/json" \
-  -d '{"question": "1+1等于几", "question_type": "single", "options": "A.1 B.2 C.3 D.4"}'
-
 # 获取配置示例
 curl http://localhost:8000/api/v1/config/example
+
+# 健康检查
+curl http://localhost:8000/health
 ```
 
 ## AI回答模式
@@ -338,16 +363,15 @@ AI生成的答案会自动保存到本地数据库，供后续查询使用。
 - CORS已配置为允许所有来源
 - AI API需要有效的密钥
 - 本地数据库自动创建和更新
-- 推荐使用GET接口，更简洁高效
-- POST接口支持更复杂的参数组合
+- 推荐使用GET接口，简洁高效
 - 所有响应格式统一，便于前端处理
 - 日志中会记录完整的响应信息
 - 清除数据库后，所有请求将直接使用AI回答
-- AI回答会自动保存到数据库，提高后续响应速度与准确性
+- AI回答会自动保存到数据库，提高后续响应速度
 
 ### Redis缓存注意事项
 - 使用Redis缓存前，确保Redis服务已启动
 - 生产环境推荐使用Redis以获得更好的性能
 - Redis密码应使用强密码，确保安全
 - 定期监控Redis内存使用情况
-- 可以通过Redis CLI命令管理缓存：`redis-cli FLUSHALL` 清空所有缓存"# AI-Answer-database" 
+- 可以通过Redis CLI命令管理缓存：`redis-cli FLUSHALL` 清空所有缓存
