@@ -1,7 +1,7 @@
 """
 OCS网课助手答题API路由
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from typing import Optional
 from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
@@ -27,25 +27,7 @@ async def clear_cache():
     return {"status": "ok", "message": "缓存已清空"}
 
 
-@router.post("/config/validate")
-async def validate_ocs_config(config: str = None):
-    """
-    验证OCS题库配置格式
-    """
-    from app.utils.ocs_validator import validate_ocs_config
-    
-    # 如果没有提供配置，使用环境变量中的配置
-    if not config:
-        config = settings.QUESTION_BANK_CONFIG
-    
-    if not config:
-        return {
-            "valid": False,
-            "error": "未提供配置，且环境变量中未配置QUESTION_BANK_CONFIG"
-        }
-    
-    result = validate_ocs_config(config)
-    return result
+
 
 
 @router.get("/config/example")
@@ -130,13 +112,7 @@ async def get_question_bank_status():
         }
 
 
-@router.post("/status")
-async def refresh_question_bank_status():
-    """
-    刷新题库状态 - OCS刷新题库状态接口（POST方法）
-    """
-    # 调用GET方法获取状态
-    return await get_question_bank_status()
+
 
 
 @router.get("/search")
@@ -186,19 +162,19 @@ async def search_question(q: str = "", type: str = "single", options: str = ""):
         
         # 处理答案格式，如果是选择题则提取选项字母
         answer_text = result['answer']
-        answers = []
+        final_answer = ""
         
         # 如果是单选题或多选题，提取选项字母
         if type in ["single", "multiple"] and answer_text:
-            # 简单处理：如果答案是单个字母，直接使用
-            if len(answer_text) <= 5 and answer_text.replace("#", "").replace(" ", "").isalpha():
-                answers = answer_text.split("#") if "#" in answer_text else [answer_text]
+            # 简单处理：如果答案是单个字母或用#连接的多个字母，直接使用
+            if len(answer_text) <= 10 and answer_text.replace("#", "").replace(" ", "").isalpha():
+                final_answer = answer_text
             else:
                 # 否则使用完整答案
-                answers = [answer_text]
+                final_answer = answer_text
         else:
             # 其他题型直接使用答案
-            answers = [answer_text]
+            final_answer = answer_text
         
         # 构建标准响应格式
         response_data = {
@@ -206,7 +182,7 @@ async def search_question(q: str = "", type: str = "single", options: str = ""):
             "results": [
                 {
                     "question": q,
-                    "answer": answers[0] if answers else ""
+                    "answer": final_answer
                 }
             ]
         }

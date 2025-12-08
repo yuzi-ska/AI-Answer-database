@@ -127,10 +127,8 @@ RESPONSE_CODE_ERROR=0
 - **GET** `/health` - 主应用状态
 - **GET** `/api/v1/health` - API模块状态
 - **GET** `/api/v1/cache/clear` - 清空缓存
-- **POST** `/api/v1/config/validate` - 验证OCS配置
 - **GET** `/api/v1/config/example` - 获取配置示例
 - **GET** `/api/v1/status` - 获取题库状态
-- **POST** `/api/v1/status` - 刷新题库状态
 
 ### API文档
 
