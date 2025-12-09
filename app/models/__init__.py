@@ -21,6 +21,8 @@ class QuestionAnswer(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     question = Column(String, index=True)  # 题目内容
+    question_type = Column(String, index=True)  # 题目类型 (single, multiple, judgment, completion等)
+    options = Column(Text)  # 选项内容
     answer = Column(Text)  # 答案内容
     source = Column(String, default="unknown")  # 来源 (ai, question_bank, etc.)
     created_at = Column(DateTime, default=datetime.utcnow)  # 创建时间

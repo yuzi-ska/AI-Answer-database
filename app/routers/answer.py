@@ -125,6 +125,7 @@ async def search_question(q: str = "", type: str = "single", options: str = ""):
     try:
         from app.utils.answer_processor import process_question_with_multi_layer
         from app.schemas.answer import OCSQuestionContext
+        from app.utils.question_detector import clean_question_text, normalize_answer_for_type
         
         # 处理URL编码
         from urllib.parse import unquote
@@ -133,14 +134,18 @@ async def search_question(q: str = "", type: str = "single", options: str = ""):
         if options:
             options = unquote(options)
         
+        # 清理题目文本
+        clean_q = clean_question_text(q)
+        clean_options = clean_question_text(options) if options else ""
+        
         # 构建OCS兼容的上下文
         question_context = OCSQuestionContext(
-            title=q,
+            title=clean_q,
             type=type,
-            options=options
+            options=clean_options
         )
         
-        logger.info(f"OCS搜索请求: {q}, 类型: {type}, 选项: {options}")
+        logger.info(f"OCS搜索请求: {clean_q}, 原始类型: {type}, 选项: {clean_options}")
         
         # 使用多层查询架构获取答案
         result = await process_question_with_multi_layer(
@@ -155,33 +160,30 @@ async def search_question(q: str = "", type: str = "single", options: str = ""):
                 "code": settings.RESPONSE_CODE_ERROR,
                 "results": []
             }
-            logger.warning(f"OCS搜索未找到答案: {q}, 响应: {response_data}")
+            logger.warning(f"OCS搜索未找到答案: {clean_q}, 响应: {response_data}")
             return response_data
         
-        logger.info(f"OCS搜索成功，来源: {result['source']}, 问题: {q}")
+        logger.info(f"OCS搜索成功，来源: {result['source']}, 问题: {clean_q}")
         
-        # 处理答案格式，如果是选择题则提取选项字母
-        answer_text = result['answer']
-        final_answer = ""
+        # 获取实际的题目类型（可能经过智能检测修正）
+        actual_type = result.get('question_type', type)
+        actual_options = result.get('options', clean_options)
         
-        # 如果是单选题或多选题，提取选项字母
-        if type in ["single", "multiple"] and answer_text:
-            # 简单处理：如果答案是单个字母或用#连接的多个字母，直接使用
-            if len(answer_text) <= 10 and answer_text.replace("#", "").replace(" ", "").isalpha():
-                final_answer = answer_text
-            else:
-                # 否则使用完整答案
-                final_answer = answer_text
-        else:
-            # 其他题型直接使用答案
-            final_answer = answer_text
+        # 根据实际题型格式化答案
+        final_answer = normalize_answer_for_type(
+            result['answer'],
+            actual_type,
+            actual_options
+        )
         
         # 构建标准响应格式
         response_data = {
             "code": settings.RESPONSE_CODE_SUCCESS,
             "results": [
                 {
-                    "question": q,
+                    "question": clean_q,
+                    "question_type": actual_type,
+                    "options": actual_options,
                     "answer": final_answer
                 }
             ]

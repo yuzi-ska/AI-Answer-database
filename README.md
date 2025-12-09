@@ -100,28 +100,6 @@ RESPONSE_CODE_ERROR=0
 
 ## API接口
 
-### OCS搜索接口（推荐）
-
-**GET** `/api/search?q=问题内容&type=single&options=A.选项1 B.选项2`
-
-参数说明：
-- `q` - 问题内容（支持URL编码）
-- `type` - 题目类型（single/multiple/judgment/completion等）
-- `options` - 选项内容（支持URL编码）
-
-响应格式：
-```json
-{
-  "code": 1,
-  "results": [
-    {
-      "question": "问题内容",
-      "answer": "A"
-    }
-  ]
-}
-```
-
 ### 管理接口
 
 - **GET** `/health` - 主应用状态
@@ -146,6 +124,8 @@ RESPONSE_CODE_ERROR=0
   "results": [
     {
       "question": "问题内容",
+      "question_type": "题目类型",
+      "options": "选项内容（如果有）",
       "answer": "答案内容"
     }
   ]
@@ -167,15 +147,55 @@ RESPONSE_CODE_ERROR=0
   "results": [
     {
       "question": "问题内容",
+      "question_type": "multiple",
+      "options": "A.选项1\nB.选项2\nC.选项3\nD.选项4",
       "answer": "A#B#C"
     }
   ]
 }
 ```
 
-- 单选题：`answer` 包含单个选项字母
-- 多选题：`answer` 包含多个选项字母，用#分隔
-- 其他题型：`answer` 包含完整答案文本
+### 填空题响应
+```json
+{
+  "code": 1,
+  "results": [
+    {
+      "question": "问题内容",
+      "question_type": "completion",
+      "options": "",
+      "answer": "填空答案内容"
+    }
+  ]
+}
+```
+
+### 判断题响应
+```json
+{
+  "code": 1,
+  "results": [
+    {
+      "question": "问题内容",
+      "question_type": "judgment",
+      "options": "",
+      "answer": "对"
+    }
+  ]
+}
+```
+
+#### 响应字段说明
+- `question`: 问题内容（已清理无意义换行符）
+- `question_type`: 题目类型（single/multiple/judgment/completion）
+- `options`: 选项内容（选择题有值，其他题型为空）
+- `answer`: 答案内容（根据题型格式化）
+
+#### 答案格式说明
+- 单选题：`answer` 包含单个选项字母（如：A、B、C、D）
+- 多选题：`answer` 包含多个选项字母，用#分隔（如：A#B#C）
+- 判断题：`answer` 包含"对"或"错"
+- 填空题：`answer` 包含完整答案文本
 
 ## 查询优先级
 
@@ -244,6 +264,30 @@ AI生成的答案会自动保存到本地数据库，供后续查询使用。
 [{"url": "http://localhost:8000/api/search?q=${title}&type=${type}&options=${options}", "name": "OCS AI+题库API", "method": "get", "contentType": "json", "handler": "return (res)=> res.code === 1 && res.results.length > 0 ? [res.results[0].question, res.results[0].answer] : undefined"}]
 ```
 
+### 配置说明
+
+- **智能题型识别**：系统会自动识别题目类型（填空题、选择题、判断题等）
+- **多题型支持**：同一题目的不同题型可以分别存储和查询
+- **文本清理**：自动清理HTML/JavaScript代码和无意义字符
+- **精确匹配**：通过题目、类型和选项进行精确匹配，避免答案混淆
+
+### 响应格式更新
+
+API响应现在包含完整的题目信息：
+```json
+{
+  "code": 1,
+  "results": [
+    {
+      "question": "题目内容",
+      "question_type": "题目类型",
+      "options": "选项内容",
+      "answer": "答案内容"
+    }
+  ]
+}
+```
+
 ## API测试
 
 ```bash
@@ -260,7 +304,7 @@ curl http://localhost:8000/health
 ## AI回答模式
 
 ### 选择题模式
-当提供选项时，AI会：
+当提供选项时：
 - 单选题：只返回选项字母（如：A、B、C、D）
 - 多选题：用#连接选项字母（如：A#B#C）
 - 不进行任何解释或讲解
@@ -348,17 +392,26 @@ python clear_database.py
 ### 查询优先级
 
 系统按以下优先级查询答案：
-1. **缓存** - 最快响应
+1. **缓存** - 最快响应（包含题目、类型和选项的完整匹配）
 2. **本地数据库** - 历史AI答案和手动添加的题目
 3. **OCS题库** - 外部题库接口
 4. **AI模型** - 最后的答案来源
+
+### 题目类型智能识别
+- 根据题目内容自动识别题型（填空题、选择题、判断题等）
+- 避免填空题被错误识别为选择题
+- 支持同一题目的不同题型分别存储和查询
+
+### 多题型支持
+- 同一题目的不同题型（如填空题和选择题）可以同时存储在数据库中
+- 通过题目类型进行精确匹配，避免答案混淆
+- 缓存键包含题型信息，确保不同题型的同一题目独立缓存
 
 AI生成的答案会自动保存到本地数据库，供后续查询使用。
 
 ## 注意事项
 
 - 确保OCS题库URL可访问
-- CORS已配置为允许所有来源
 - AI API需要有效的密钥
 - 本地数据库自动创建和更新
 - 推荐使用GET接口，简洁高效

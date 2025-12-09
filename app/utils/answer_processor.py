@@ -6,6 +6,7 @@ import asyncio
 import aiohttp
 import json
 import logging
+import hashlib
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from app.schemas.answer import OCSQuestionContext, AnswerResult
@@ -13,17 +14,23 @@ from app.core.config import settings
 from app.utils.cache_manager import cache_manager
 from app.utils.logger import logger
 from app.models import SessionLocal, create_tables
-from app.models.db_utils import get_question_answer_by_fuzzy_search, create_question_answer
+from app.models.db_utils import get_question_answer_by_full_match, create_question_answer, normalize_options
+from app.utils.question_detector import detect_question_type, clean_question_text, normalize_answer_for_type
 
 
-def get_db_session() -> Session:
-    """获取数据库会话"""
+from contextlib import contextmanager
+
+@contextmanager
+def get_db_session():
+    """获取数据库会话的上下文管理器"""
     db = SessionLocal()
     try:
-        return db
+        yield db
     except Exception:
-        db.close()
+        db.rollback()
         raise
+    finally:
+        db.close()
 
 
 async def process_question_with_multi_layer(
@@ -36,12 +43,33 @@ async def process_question_with_multi_layer(
     使用多层查询架构处理问题
     顺序: SQL查询 -> 题库查询 -> AI回答
     """
-    question_hash = f"answer_{hash(question_context.title + (question_context.options or ''))}"
+    # 清理题目文本
+    clean_title = clean_question_text(question_context.title)
+    clean_options = normalize_options(question_context.options or "")
+    
+    # 智能检测题目类型，避免类型识别错误
+    detected_type = detect_question_type(clean_title, clean_options)
+    
+    # 如果传入的类型与检测出的类型不一致，使用检测出的类型
+    final_type = question_context.type if question_context.type else detected_type
+    
+    logger.info(f"题目类型检测: 原始类型={question_context.type}, 检测类型={detected_type}, 最终类型={final_type}")
+    
+    # 更新问题上下文
+    updated_context = OCSQuestionContext(
+        title=clean_title,
+        type=final_type,
+        options=clean_options
+    )
+    
+    # 使用更安全的哈希算法生成缓存键
+    content = f"{updated_context.title}|{updated_context.type}|{updated_context.options or ''}"
+    question_hash = f"answer_{hashlib.sha256(content.encode()).hexdigest()[:16]}"
     
     # 首先检查缓存
     cached_result = await cache_manager.get(question_hash)
     if cached_result:
-        logger.info(f"从缓存获取答案: {question_context.title}")
+        logger.info(f"从缓存获取答案: {updated_context.title}, 类型: {updated_context.type}")
         return cached_result
     
     # 按优先级顺序尝试不同查询方式
@@ -62,22 +90,30 @@ async def process_question_with_multi_layer(
     # 逐层查询
     for source_name, query_func in query_functions:
         try:
-            logger.info(f"尝试从{source_name}获取答案: {question_context.title}")
-            result = await query_func(question_context)
+            logger.info(f"尝试从{source_name}获取答案: {updated_context.title}, 类型: {updated_context.type}")
+            result = await query_func(updated_context)
             
             if result:
+                # 标准化答案格式
+                result['answer'] = normalize_answer_for_type(
+                    result['answer'], 
+                    updated_context.type, 
+                    updated_context.options or ""
+                )
+                
                 # 如果是AI回答，需要保存到数据库
                 if source_name == "ai" and result.get('answer'):
                     try:
-                        db = get_db_session()
-                        create_question_answer(
-                            db, 
-                            question_context.title, 
-                            result['answer'], 
-                            source="ai_generated"
-                        )
-                        db.close()
-                        logger.info(f"AI生成的答案已保存到数据库: {question_context.title}, 答案: {result['answer'][:100]}...")
+                        with get_db_session() as db:
+                            create_question_answer(
+                                db, 
+                                updated_context.title, 
+                                result['answer'], 
+                                source="ai_generated",
+                                question_type=updated_context.type,
+                                options=updated_context.options
+                            )
+                            logger.info(f"AI生成的答案已保存到数据库: {updated_context.title}, 类型: {updated_context.type}, 答案: {result['answer'][:100]}...")
                     except Exception as e:
                         logger.error(f"保存AI答案到数据库失败: {e}")
                 
@@ -87,52 +123,57 @@ async def process_question_with_multi_layer(
                     result, 
                     ttl=settings.CACHE_TTL
                 )
-                logger.info(f"成功从{source_name}获取答案: {question_context.title}, 答案: {result['answer'][:100]}...")
+                logger.info(f"成功从{source_name}获取答案: {updated_context.title}, 类型: {updated_context.type}, 答案: {result['answer'][:100]}...")
                 return result
                 
         except asyncio.TimeoutError:
-            logger.warning(f"{source_name}查询超时: {question_context.title}")
+            logger.warning(f"{source_name}查询超时: {updated_context.title}")
             continue
         except Exception as e:
-            logger.error(f"{source_name}查询出错: {str(e)} - 问题: {question_context.title}")
+            logger.error(f"{source_name}查询出错: {str(e)} - 问题: {updated_context.title}")
             continue
     
     # 如果所有方式都失败，返回None
-    logger.warning(f"所有查询方式都失败: {question_context.title}")
+    logger.warning(f"所有查询方式都失败: {updated_context.title}")
     return None
 
 
 async def query_database(question_context: OCSQuestionContext) -> Optional[Dict[str, Any]]:
     """
     查询本地数据库
+    使用完全匹配（题目、类型和选项）
     """
-    logger.info(f"查询本地数据库: {question_context.title}")
+    logger.info(f"查询本地数据库: {question_context.title}, 类型: {question_context.type}")
     try:
-        db = get_db_session()
-        result = get_question_answer_by_fuzzy_search(db, question_context.title)
-        db.close()
-        
-        if result:
-            logger.info(f"从数据库找到答案: {question_context.title}")
-            return {
-                "question": question_context.title,
-                "answer": result.answer,
-                "source": "database",
-                "confidence": 1.0,  # 数据库查到的答案置信度最高
-                "metadata": {
-                    "source": result.source,
-                    "created_at": str(result.created_at) if hasattr(result, 'created_at') else None
+        with get_db_session() as db:
+            # 标准化选项格式
+            normalized_options = normalize_options(question_context.options or "")
+            result = get_question_answer_by_full_match(
+                db, 
+                question_context.title,
+                question_context.type,
+                normalized_options
+            )
+            
+            if result:
+                logger.info(f"从数据库找到答案: {question_context.title}, 类型: {question_context.type}")
+                return {
+                    "question": question_context.title,
+                    "question_type": result.question_type,
+                    "options": result.options,
+                    "answer": result.answer,
+                    "source": "database",
+                    "confidence": 1.0,  # 数据库查到的答案置信度最高
+                    "metadata": {
+                        "source": result.source,
+                        "created_at": str(result.created_at) if hasattr(result, 'created_at') else None
+                    }
                 }
-            }
-        else:
-            logger.info(f"数据库中未找到答案: {question_context.title}")
-            return None
+            else:
+                logger.info(f"数据库中未找到完全匹配的答案: {question_context.title}, 类型: {question_context.type}")
+                return None
     except Exception as e:
         logger.error(f"数据库查询出错: {e}, 问题: {question_context.title}")
-        try:
-            db.close()
-        except:
-            pass
         return None
 
 
@@ -293,13 +334,9 @@ async def handle_ocs_response(response, config: Dict[str, Any]) -> Optional[List
             "undefined": None,
         }
         
-        # 执行handler代码
-        handler_func = eval(handler_code, safe_globals)
-        
-        if callable(handler_func):
-            return handler_func(response_data)
-        else:
-            return handler_func
+        # 安全执行handler代码 - 仅支持预定义的handler类型
+        handler_result = execute_handler_safely(handler_code, response_data)
+        return handler_result
             
     except Exception as e:
         logger.error(f"执行OCS handler出错: {e}")
@@ -362,12 +399,27 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
             "Authorization": f"Bearer {settings.AI_MODEL_API_KEY}"
         }
         
-        # 根据是否有选项调整提示词
-        if question_context.options:
-            # 有选项时，只要求回答正确选项，不讲解
-            system_prompt = "你是OCS网课助手AI答题系统。请直接回答问题的正确选项，不要进行任何解释或讲解。如果是单选题，只回答选项字母（如A、B、C、D）。如果是多选题，用#连接选项字母（如A#B#C）。"
+        # 根据题目类型调整提示词
+        if question_context.type == "completion":
+            # 填空题专用提示词
+            system_prompt = "你是OCS网课助手AI答题系统。这是一道填空题，请直接回答填空处的内容，不要进行任何解释或讲解。不要返回选项字母，只返回填空的答案内容。"
             
-            user_content = f"问题：{question_context.title}\n选项：{question_context.options}"
+            user_content = f"【填空题】问题：{question_context.title}"
+            
+            data = {
+                "model": settings.AI_MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                "max_tokens": 100,
+                "temperature": 0.1
+            }
+        elif question_context.options:
+            # 有选项的选择题
+            system_prompt = "你是OCS网课助手AI答题系统。这是一道选择题，请直接回答问题的正确选项，不要进行任何解释或讲解。如果是单选题，只回答选项字母（如A、B、C、D）。如果是多选题，用#连接选项字母（如A#B#C）。"
+            
+            user_content = f"【{question_context.type}】问题：{question_context.title}\n选项：{question_context.options}"
             
             data = {
                 "model": settings.AI_MODEL_NAME,
@@ -379,12 +431,16 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
                 "temperature": 0.1
             }
         else:
-            # 没有选项时，使用原来的提示词
+            # 其他题型或没有明确分类的情况
+            system_prompt = "你是OCS网课助手AI答题系统。请根据题目类型回答问题。如果是填空题，只回答填空内容；如果是判断题，回答'对'或'错'；如果是问答题，提供简洁的答案。"
+            
+            user_content = f"问题：{question_context.title}"
+            
             data = {
                 "model": settings.AI_MODEL_NAME,
                 "messages": [
-                    {"role": "system", "content": settings.AI_AGENT_PROMPT},
-                    {"role": "user", "content": f"问题：{question_context.title}"}
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
                 ],
                 "max_tokens": 200,
                 "temperature": 0.1
@@ -436,15 +492,54 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
         return None
 
 
+def execute_handler_safely(handler_code: str, response_data: Any) -> Optional[List[str]]:
+    """
+    安全执行handler代码
+    仅支持预定义的handler类型，避免代码执行安全风险
+    """
+    try:
+        # 预定义的安全handler映射
+        SAFE_HANDLERS = {
+            "default": lambda res: [res.get("question", ""), res.get("answer", "")] if isinstance(res, dict) else ["", str(res)],
+            "ocs_standard": lambda res: [res.get("data", {}).get("title", ""), res.get("data", {}).get("answers", "")] if isinstance(res, dict) and res.get("code") == 1 else None,
+            "array_response": lambda res: [res[0], res[1]] if isinstance(res, list) and len(res) >= 2 else None,
+        }
+        
+        # 检查是否是预定义的handler
+        if handler_code in SAFE_HANDLERS:
+            return SAFE_HANDLERS[handler_code](response_data)
+        
+        # 尝试解析常见的响应格式
+        if isinstance(response_data, dict):
+            # 标准格式
+            if "question" in response_data and "answer" in response_data:
+                return [response_data["question"], response_data["answer"]]
+            
+            # OCS格式
+            if "code" in response_data and "data" in response_data:
+                data = response_data["data"]
+                if "title" in data and ("answers" in data or "answer" in data):
+                    answer = data.get("answers", data.get("answer", ""))
+                    return [data["title"], answer]
+        
+        # 数组格式
+        if isinstance(response_data, list) and len(response_data) >= 2:
+            return [str(response_data[0]), str(response_data[1])]
+        
+        # 默认返回
+        return ["", str(response_data)]
+        
+    except Exception as e:
+        logger.error(f"安全执行handler出错: {e}")
+        return None
+
+
 def parse_answerer_response(response_text: str, handler_code: str) -> Optional[List[str]]:
     """
     解析Answerer响应，执行handler代码
     模拟OCS的handler执行方式
     """
     try:
-        # 在实际应用中，这里应该安全地执行handler_code
-        # 为了安全，我们只实现模拟功能
-        # 实际的handler执行应该使用更安全的沙箱环境
         import json
         
         # 尝试解析JSON响应

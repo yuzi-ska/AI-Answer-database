@@ -2,16 +2,16 @@
 OCS网课助手数据库工具
 """
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, List
 from app.models import QuestionAnswer
 import re
 
 
-def create_question_answer(db: Session, question: str, answer: str, source: str = "unknown") -> QuestionAnswer:
+def create_question_answer(db: Session, question: str, answer: str, source: str = "unknown", question_type: str = "", options: str = "") -> QuestionAnswer:
     """
     创建题目答案记录
     """
-    db_qa = QuestionAnswer(question=question, answer=answer, source=source)
+    db_qa = QuestionAnswer(question=question, question_type=question_type, options=options, answer=answer, source=source)
     db.add(db_qa)
     db.commit()
     db.refresh(db_qa)
@@ -20,63 +20,49 @@ def create_question_answer(db: Session, question: str, answer: str, source: str 
 
 def get_question_answer_by_exact_match(db: Session, question: str) -> Optional[QuestionAnswer]:
     """
-    精确匹配查询题目答案
+    精确匹配查询题目答案（仅题目）
     """
     return db.query(QuestionAnswer).filter(QuestionAnswer.question == question).first()
 
 
-def search_question_answer_fuzzy(db: Session, question: str) -> Optional[QuestionAnswer]:
+def normalize_options(options: str) -> str:
     """
-    模糊查询题目答案
-    使用 LIKE 操作进行模糊匹配
+    标准化选项格式，去除多余空格和换行
     """
-    # 首先尝试精确匹配
-    exact_match = db.query(QuestionAnswer).filter(QuestionAnswer.question == question).first()
-    if exact_match:
-        return exact_match
-    
-    # 如果没有精确匹配，尝试模糊匹配
-    # 移除可能的标点符号，进行更宽松的匹配
-    import re
-    # 移除标点符号并转为小写
-    clean_question = re.sub(r'[^\w\s]', ' ', question.lower())
-    
-    # 查找包含所有关键词的记录
-    keywords = [kw for kw in clean_question.split() if len(kw) > 2]  # 只考虑长度大于2的词
-    
-    if not keywords:
-        return None
-    
-    # 构建查询条件，查找包含尽可能多关键词的题目
-    query_result = db.query(QuestionAnswer)
-    for keyword in keywords:
-        query_result = query_result.filter(QuestionAnswer.question.like(f"%{keyword}%"))
-    
-    # 返回最匹配的结果
-    result = query_result.first()
-    
-    # 如果上面的查询没有结果，尝试更宽松的模糊匹配
-    if not result:
-        # 尝试匹配至少包含部分关键词的题目
-        for keyword in keywords:
-            fuzzy_result = db.query(QuestionAnswer).filter(
-                QuestionAnswer.question.like(f"%{keyword}%")
-            ).first()
-            if fuzzy_result:
-                return fuzzy_result
-    
-    return result
+    if not options:
+        return ""
+    # 去除每行前后空格，然后用换行符连接
+    lines = [line.strip() for line in options.split("\n") if line.strip()]
+    return "\n".join(lines)
 
 
-def get_question_answer_by_fuzzy_search(db: Session, question: str) -> Optional[QuestionAnswer]:
+def get_question_answer_by_full_match(db: Session, question: str, question_type: str = "", options: str = "") -> Optional[QuestionAnswer]:
     """
-    使用更高级的模糊搜索算法查找题目答案
+    完全匹配查询题目答案（题目、类型和选项）
+    只有当题目、类型和选项完全一致时才返回结果
     """
-    # 首先尝试精确匹配
-    exact_match = get_question_answer_by_exact_match(db, question)
-    if exact_match:
-        return exact_match
+    query = db.query(QuestionAnswer).filter(QuestionAnswer.question == question)
     
-    # 使用模糊搜索
-    fuzzy_match = search_question_answer_fuzzy(db, question)
-    return fuzzy_match
+    # 添加类型过滤条件 - 这是关键区分点
+    if question_type:
+        query = query.filter(QuestionAnswer.question_type == question_type)
+    
+    # 标准化选项格式
+    normalized_options = normalize_options(options)
+    
+    # 添加选项过滤条件
+    if normalized_options:
+        query = query.filter(QuestionAnswer.options == normalized_options)
+    else:
+        # 如果没有提供选项，则查找选项为空的记录
+        query = query.filter(QuestionAnswer.options == "" )
+    
+    return query.first()
+
+
+def get_all_question_answers_by_question(db: Session, question: str) -> List[QuestionAnswer]:
+    """
+    获取同一题目的所有不同题型答案
+    用于返回同一题目的多种题型答案（如填空题和选择题版本）
+    """
+    return db.query(QuestionAnswer).filter(QuestionAnswer.question == question).all()
