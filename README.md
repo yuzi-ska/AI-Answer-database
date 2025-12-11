@@ -11,7 +11,7 @@
 
 - AI+题库混合答题
 - 支持OpenAI兼容接口（OpenAI、DeepSeek、通义千问等）
-- 完全兼容OCS AnswererWrapper接口
+- 兼容OCS AnswererWrapper接口
 - 支持GET请求方式
 - 异步高并发处理
 - 本地SQLite数据库存储
@@ -187,7 +187,7 @@ RESPONSE_CODE_ERROR=0
 
 #### 响应字段说明
 - `question`: 问题内容（已清理无意义换行符）
-- `question_type`: 题目类型（single/multiple/judgment/completion）
+- `question_type`: 题目类型（**single/multiple/judgment/completion**）
 - `options`: 选项内容（选择题有值，其他题型为空）
 - `answer`: 答案内容（根据题型格式化）
 
@@ -213,14 +213,12 @@ AI生成的答案会自动保存到本地数据库，供后续查询使用。
 - ✅ 无需额外服务
 - ✅ 配置简单
 - ❌ 服务重启后缓存丢失
-- ❌ 多实例无法共享缓存
 
 ### Redis缓存
 - ✅ 持久化存储
 - ✅ 多实例共享缓存
 - ✅ 支持集群部署
 - ✅ 更高的缓存性能
-- ❌ 需要Redis服务
 - ❌ 配置稍复杂
 
 ## OCS题库配置格式
@@ -263,13 +261,6 @@ AI生成的答案会自动保存到本地数据库，供后续查询使用。
 ```json
 [{"url": "http://localhost:8000/api/search?q=${title}&type=${type}&options=${options}", "name": "OCS AI+题库API", "method": "get", "contentType": "json", "handler": "return (res)=> res.code === 1 && res.results.length > 0 ? [res.results[0].question, res.results[0].answer] : undefined"}]
 ```
-
-### 配置说明
-
-- **智能题型识别**：系统会自动识别题目类型（填空题、选择题、判断题等）
-- **多题型支持**：同一题目的不同题型可以分别存储和查询
-- **文本清理**：自动清理HTML/JavaScript代码和无意义字符
-- **精确匹配**：通过题目、类型和选项进行精确匹配，避免答案混淆
 
 ### 响应格式更新
 
@@ -333,11 +324,13 @@ CACHE_TTL=3600
 ```
 
 **Redis连接格式说明：**
+
 - `redis://localhost:6379/0` - 本地Redis，数据库0
 - `redis://:password@localhost:6379/0` - 带密码的Redis
 - `redis://username:password@host:port/db` - 完整连接字符串
 
 **Redis配置参数：**
+
 - `REDIS_URL` - Redis连接字符串
 - `REDIS_PASSWORD` - Redis密码（可选）
 - `REDIS_DB` - Redis数据库编号（默认0）
@@ -389,30 +382,16 @@ clear_database()
 python clear_database.py
 ```
 
-### 查询优先级
-
-系统按以下优先级查询答案：
-1. **缓存** - 最快响应（包含题目、类型和选项的完整匹配）
-2. **本地数据库** - 历史AI答案和手动添加的题目
-3. **OCS题库** - 外部题库接口
-4. **AI模型** - 最后的答案来源
-
 ### 题目类型智能识别
 - 根据题目内容自动识别题型（填空题、选择题、判断题等）
-- 避免填空题被错误识别为选择题
 - 支持同一题目的不同题型分别存储和查询
-
-### 多题型支持
-- 同一题目的不同题型（如填空题和选择题）可以同时存储在数据库中
-- 通过题目类型进行精确匹配，避免答案混淆
-- 缓存键包含题型信息，确保不同题型的同一题目独立缓存
 
 AI生成的答案会自动保存到本地数据库，供后续查询使用。
 
 ## 注意事项
 
 - 确保OCS题库URL可访问
-- AI API需要有效的密钥
+- 请确定AI API密钥和请求地址正确
 - 本地数据库自动创建和更新
 - 推荐使用GET接口，简洁高效
 - 所有响应格式统一，便于前端处理
