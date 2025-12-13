@@ -60,6 +60,9 @@ AI_MODEL_BASE_URL=https://api.openai.com/v1
 # AI_MODEL_NAME=qwen-plus
 # AI_MODEL_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
+# 智能体配置
+AI_AGENT_PROMPT=你的AI提示词
+
 # OCS题库配置
 # 单个题库配置示例
 # QUESTION_BANK_CONFIG=[{"url":"https://api.example.com/search?q=${title}","name":"示例题库","method":"get","contentType":"json","handler":"return (res)=> res.code === 200 ? [res.data.question, res.data.answer] : undefined"}]
