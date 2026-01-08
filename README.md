@@ -32,6 +32,12 @@ pip install -r requirements.txt
 # 启动Redis服务（如果使用Redis缓存）
 redis-server
 
+#创建虚拟环境
+python3 -m venv venv
+
+#激活虚拟环境
+source venv/bin/activate
+
 # 启动服务
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
@@ -262,7 +268,15 @@ AI生成的答案会自动保存到本地数据库，供后续查询使用。
 ### 推荐配置（使用搜索接口）
 
 ```json
-[{"url": "http://localhost:8000/api/search?q=${title}&type=${type}&options=${options}", "name": "OCS AI+题库API", "method": "get", "contentType": "json", "handler": "return (res)=> res.code === 1 && res.results.length > 0 ? [res.results[0].question, res.results[0].answer] : undefined"}]
+[
+    {
+        "url": "http://localhost:8000/api/search?q=${title}&type=${type}&options=${options}",
+        "name": "OCS AI+题库API",
+        "method": "get",
+        "contentType": "json",
+        "handler": "return (res)=> res.code === 1 && res.results.length > 0 ? [res.results[0].question, res.results[0].answer] : undefined"
+    }
+]
 ```
 
 ### 响应格式更新
