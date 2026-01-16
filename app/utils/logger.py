@@ -2,7 +2,6 @@
 OCS网课助手日志配置
 """
 import logging
-import logging.handlers
 import os
 import sys
 from pathlib import Path
@@ -15,7 +14,6 @@ def setup_logger(name: str = "ocs_api", log_file: str = None, level: str = None)
     """
     # 检查Python是否正在关闭
     if hasattr(sys, 'meta_path') and sys.meta_path is None:
-        # Python正在关闭，返回一个简单的logger
         return logging.getLogger(name)
     
     try:
@@ -43,30 +41,20 @@ def setup_logger(name: str = "ocs_api", log_file: str = None, level: str = None)
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
         
-        # 文件处理器 - 使用RotatingFileHandler实现日志轮转
-        max_bytes = settings.LOG_MAX_SIZE
-        if max_bytes.endswith('MB'):
-            max_bytes = int(max_bytes[:-2]) * 1024 * 1024
-        elif max_bytes.endswith('KB'):
-            max_bytes = int(max_bytes[:-2]) * 1024
-        else:
-            max_bytes = int(max_bytes)
-        
-        file_handler = logging.handlers.RotatingFileHandler(
+        # 文件处理器 - 使用普通FileHandler，无大小限制
+        file_handler = logging.FileHandler(
             log_file,
-            maxBytes=max_bytes,
-            backupCount=settings.LOG_BACKUP_COUNT,
-            encoding='utf-8'
+            encoding='utf-8',
+            delay=True  # 延迟打开文件直到第一次写入
         )
         file_handler.setFormatter(formatter)
         
-        # 控制台处理器 - 添加错误处理
+        # 控制台处理器
         try:
             console_handler = logging.StreamHandler()
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
         except Exception:
-            # 如果控制台处理器创建失败，只使用文件处理器
             pass
         
         logger.addHandler(file_handler)
@@ -74,7 +62,6 @@ def setup_logger(name: str = "ocs_api", log_file: str = None, level: str = None)
         return logger
         
     except Exception:
-        # 如果日志设置失败，返回基本logger
         return logging.getLogger(name)
 
 

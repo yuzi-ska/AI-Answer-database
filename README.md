@@ -1,6 +1,6 @@
 # OCS网课助手AI+题库API
 
-基于AI、数据库和题库的智能答题API，兼容OCS网课助手的AnswererWrapper接口。
+基于AI和题库的智能答题API，兼容OCS网课助手的AnswererWrapper接口。
 
 ## 使用须知
 
@@ -14,29 +14,20 @@
 - 兼容OCS AnswererWrapper接口
 - 支持GET请求方式
 - 异步高并发处理
-- 本地SQLite数据库存储
-- 灵活的缓存方案（内存/Redis）
-- 可配置的API版本和响应格式
+- **手动题库管理**（JSON文件存储），预防一些刁难题目
+- 实时查询
+- 灵活的题库配置
 - 统一的响应格式标准
 
 ## 安装和运行
 
 ```bash
+# 创建虚拟环境
+python3 -m venv .venv
+source .venv/bin/activate
+
 # 安装依赖
 pip install -r requirements.txt
-
-# 如果使用Redis缓存，需要安装Redis
-# Windows: 下载Redis for Windows或使用Docker
-# Linux/Mac: sudo apt-get install redis-server 或 brew install redis
-
-# 启动Redis服务（如果使用Redis缓存）
-redis-server
-
-#创建虚拟环境
-python3 -m venv venv
-
-#激活虚拟环境
-source venv/bin/activate
 
 # 启动服务
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
@@ -47,9 +38,6 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 创建 `.env` 文件：
 
 ```env
-# 数据库
-DATABASE_URL=sqlite:///./ocs_api.db
-
 # AI模型（OpenAI兼容接口）
 AI_MODEL_API_KEY=your-api-key-here
 AI_MODEL_PROVIDER=openai
@@ -76,18 +64,8 @@ AI_AGENT_PROMPT=你的AI提示词
 # 多个题库配置示例（取消注释使用）
 # QUESTION_BANK_CONFIG=[{"url":"https://api.xinghuo.com/search?q=${title}","name":"星火题库","method":"get","contentType":"json","headers":{"Authorization":"Bearer your-api-key"},"handler":"return (res)=> res.code === 200 ? [res.data.question, res.data.answer] : undefined"},{"url":"https://api.xueersi.com/v1/question/search","name":"学而思题库","method":"post","contentType":"json","data":{"question":"${title}","type":"${type}"},"headers":{"X-API-Key":"your-api-key"},"handler":"return (res)=> res.status === 'success' && res.data ? [res.data.question, res.data.answer] : undefined"}]
 
-# 缓存配置
-# 使用内存缓存（默认）
-USE_REDIS_CACHE=false
-MEMORY_CACHE_SIZE=1000
-CACHE_TTL=3600
-
-# 使用Redis缓存（取消注释以下配置）
-# USE_REDIS_CACHE=true
-# REDIS_URL=redis://localhost:6379/0
-# REDIS_PASSWORD=your-redis-password
-# REDIS_DB=0
-# CACHE_TTL=3600
+# 题库查询超时时间（秒）
+QUESTION_BANK_TIMEOUT=10
 
 # 日志
 LOG_LEVEL=INFO
@@ -113,9 +91,19 @@ RESPONSE_CODE_ERROR=0
 
 - **GET** `/health` - 主应用状态
 - **GET** `/api/v1/health` - API模块状态
-- **GET** `/api/v1/cache/clear` - 清空缓存
 - **GET** `/api/v1/config/example` - 获取配置示例
 - **GET** `/api/v1/status` - 获取题库状态
+
+### 手动题库管理
+
+- **GET** `/api/v1/manual-bank` - 获取手动题库内容
+- **POST** `/api/v1/manual-bank/add` - 添加题目
+- **DELETE** `/api/v1/manual-bank/remove` - 删除题目
+- **DELETE** `/api/v1/manual-bank/clear` - 清空手动题库
+
+### 搜索接口
+
+- **GET** `/api/v1/search` - OCS题库搜索接口
 
 ### API文档
 
@@ -208,27 +196,130 @@ RESPONSE_CODE_ERROR=0
 
 ## 查询优先级
 
-系统按以下优先级查询答案：
-1. **缓存** - 最快响应
-2. **本地数据库** - 历史AI答案和手动添加的题目
-3. **OCS题库** - 外部题库接口
-4. **AI模型** - 最后的答案来源
+每次请求都**实时查询**，不使用缓存：
 
-AI生成的答案会自动保存到本地数据库，供后续查询使用。
+1. **手动题库**（最高优先级）- 存储在 `manual_question_bank.json`
+2. **OCS题库** - 外部题库接口
+3. **AI模型** - 最后的答案来源
 
-## 缓存方案对比
+## 手动题库
 
-### 内存缓存（默认）
-- ✅ 无需额外服务
-- ✅ 配置简单
-- ❌ 服务重启后缓存丢失
+手动题库使用 `manual_question_bank.json` 文件存储，**note备注不会嵌入回答中**，仅用于记录。
 
-### Redis缓存
-- ✅ 持久化存储
-- ✅ 多实例共享缓存
-- ✅ 支持集群部署
-- ✅ 更高的缓存性能
-- ❌ 配置稍复杂
+### 文件格式
+
+```json
+{
+  "题目内容": {
+    "answer": "答案",
+    "type": "single",  // 可选，指定题型（single/multiple/completion/judgment）
+    "note": "备注（可选，仅用于记录，不返回给前端）"
+  }
+}
+```
+
+### 字段说明
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| answer | 是 | 答案内容 |
+| type | 否 | 题目类型（single/multiple/completion/judgment），不指定则默认为single |
+| note | 否 | 备注，仅用于记录，不会返回给前端 |
+
+### 完整示例
+
+```json
+{
+  "中国的首都是？": {
+    "answer": "北京",
+    "note": "基础地理题"
+  },
+  "以下哪个是偶数？": {
+    "answer": "B",
+    "type": "single",
+    "note": "单选题示例"
+  },
+  "中国、美国、英国分别属于哪个大洲？": {
+    "answer": "A#C#E",
+    "type": "multiple",
+    "note": "多选题示例：A.亚洲 B.非洲 C.欧洲 D.大洋洲 E.北美洲"
+  },
+  "地球的自转方向是？": {
+    "answer": "对",
+    "type": "judgment",
+    "note": "判断题示例：正确答案为对"
+  },
+  "1+1等于几？": {
+    "answer": "2+2=4",
+    "type": "completion",
+    "note": "填空题示例：相同题目不同题型"
+  }
+}
+```
+
+### 相同题目不同题型
+
+手动题库支持**相同题目配置不同题型**，系统会优先匹配题目+类型都相同的结果：
+
+```json
+{
+  "1+1等于几？": {
+    "answer": "B",
+    "type": "single",
+    "note": "单选题：1+1等于几？ A.1 B.2 C.3 D.4"
+  },
+  "1+1等于几？": {
+    "answer": "2",
+    "type": "completion",
+    "note": "填空题：1+1等于（）、（）"
+  }
+}
+```
+
+查询优先级：
+1. 题目+类型精确匹配
+2. 题目精确匹配
+3. 模糊匹配（标题包含）
+
+### 题目类型对应的答案格式
+
+| 题目类型 | answer格式 | 示例 |
+|---------|-----------|------|
+| single（单选） | 单个选项字母 | `A`、`B`、`C`、`D` |
+| multiple（多选） | 用#连接的选项字母 | `A#B#C`、`A#D` |
+| completion（填空） | 完整答案文本 | `2`、`北京`、`H2O` |
+| judgment（判断） | `对` 或 `错` | `对`、`错` |
+
+### 管理命令
+
+```bash
+# 添加题目
+curl -X POST "http://localhost:8000/api/v1/manual-bank/add?question=1+1等于几&answer=2"
+
+# 查看题库
+curl http://localhost:8000/api/v1/manual-bank
+
+# 删除题目
+curl -X DELETE "http://localhost:8000/api/v1/manual-bank/remove?question=1+1等于几"
+
+# 清空题库
+curl -X DELETE http://localhost:8000/api/v1/manual-bank/clear
+```
+
+### 直接编辑文件
+
+也可以直接编辑 `manual_question_bank.json` 文件：
+
+```json
+{
+  "你的题目": {
+    "answer": "答案",
+    "note": "备注"
+  }
+}
+```
+
+编辑后无需重启服务，题目会立即生效。
 
 ## OCS题库配置格式
 
@@ -255,12 +346,19 @@ AI生成的答案会自动保存到本地数据库，供后续查询使用。
 | handler | string | 是 | JavaScript处理函数 |
 | method | string | 否 | get/post，默认get |
 | contentType | string | 否 | json/text，默认json |
+| headers | object | 否 | 请求头 |
+| data | object | 否 | POST请求体（支持占位符） |
+
+### 占位符说明
+
+- `${title}` - 题目内容
+- `${type}` - 题目类型（single/multiple/completion/judgment）
+- `${options}` - 选项内容
 
 ### Handler函数
 
 返回格式：
 - 单个结果：`[题目, 答案]`
-- 多个结果：`[[题目1, 答案1], [题目2, 答案2]]`
 - 无结果：`undefined`
 
 ## OCS网课助手配置
@@ -279,34 +377,23 @@ AI生成的答案会自动保存到本地数据库，供后续查询使用。
 ]
 ```
 
-### 响应格式更新
-
-API响应现在包含完整的题目信息：
-```json
-{
-  "code": 1,
-  "results": [
-    {
-      "question": "题目内容",
-      "question_type": "题目类型",
-      "options": "选项内容",
-      "answer": "答案内容"
-    }
-  ]
-}
-```
-
 ## API测试
 
 ```bash
-# 测试搜索接口
-curl "http://localhost:8000/api/search?q=1+1等于几&type=single&options=A.1 B.2 C.3 D.4"
+# 测试搜索接口（数学题）
+curl "http://localhost:8000/api/v1/search?q=1+1等于几&type=single&options=A.1+B.2+C.3+D.4"
+
+# 测试搜索接口（选择题）
+curl "http://localhost:8000/api/v1/search?q=中国的首都是哪里&type=single&options=A.上海+B.北京+C.广州+D.深圳"
 
 # 获取配置示例
 curl http://localhost:8000/api/v1/config/example
 
 # 健康检查
 curl http://localhost:8000/health
+
+# 查看手动题库
+curl http://localhost:8000/api/v1/manual-bank
 ```
 
 ## AI回答模式
@@ -320,105 +407,13 @@ curl http://localhost:8000/health
 ### 问答题模式
 当不提供选项时，AI会返回详细的解答内容。
 
-## 配置说明
-
-### 缓存配置
-
-#### 内存缓存（默认）
-```env
-USE_REDIS_CACHE=false
-MEMORY_CACHE_SIZE=1000
-CACHE_TTL=3600
-```
-
-#### Redis缓存
-```env
-USE_REDIS_CACHE=true
-REDIS_URL=redis://localhost:6379/0
-REDIS_PASSWORD=your-redis-password
-REDIS_DB=0
-CACHE_TTL=3600
-```
-
-**Redis连接格式说明：**
-
-- `redis://localhost:6379/0` - 本地Redis，数据库0
-- `redis://:password@localhost:6379/0` - 带密码的Redis
-- `redis://username:password@host:port/db` - 完整连接字符串
-
-**Redis配置参数：**
-
-- `REDIS_URL` - Redis连接字符串
-- `REDIS_PASSWORD` - Redis密码（可选）
-- `REDIS_DB` - Redis数据库编号（默认0）
-- `CACHE_TTL` - 缓存过期时间（秒）
-
-### CORS配置
-- 默认允许所有来源（`ALLOWED_ORIGINS=*`）
-- 可根据需要限制特定域名
-
-### API版本控制
-- 通过 `API_VERSION` 配置版本号
-- 通过 `API_PREFIX` 配置路径前缀
-- 支持多版本并存
-
-### 文档控制
-- `ENABLE_DOCS` 控制Swagger UI显示
-- `ENABLE_REDOC` 控制ReDoc显示
-- 生产环境可关闭文档访问
-
-### 响应格式定制
-- `RESPONSE_CODE_SUCCESS` 成功响应码
-- `RESPONSE_CODE_ERROR` 错误响应码
-
-## 数据库管理
-
-### 清除数据库数据
-
-如果需要清除数据库中的所有数据，让所有请求都从AI开始回答：
-
-```python
-# 创建清除脚本 clear_database.py
-from app.models import SessionLocal, QuestionAnswer
-
-def clear_database():
-    db = SessionLocal()
-    try:
-        count = db.query(QuestionAnswer).count()
-        db.query(QuestionAnswer).delete()
-        db.commit()
-        print(f"已清除 {count} 条记录")
-    finally:
-        db.close()
-
-clear_database()
-```
-
-运行脚本：
-```bash
-python clear_database.py
-```
-
-### 题目类型智能识别
-- 根据题目内容自动识别题型（填空题、选择题、判断题等）
-- 支持同一题目的不同题型分别存储和查询
-
-AI生成的答案会自动保存到本地数据库，供后续查询使用。
-
 ## 注意事项
 
 - 确保OCS题库URL可访问
 - 请确定AI API密钥和请求地址正确
-- 本地数据库自动创建和更新
+- **每次请求都实时查询，不使用缓存**
 - 推荐使用GET接口，简洁高效
 - 所有响应格式统一，便于前端处理
 - 日志中会记录完整的响应信息
-- 清除数据库后，所有请求将直接使用AI回答
-- AI回答会自动保存到数据库，提高后续响应速度
-
-### Redis缓存注意事项
-- 使用Redis缓存前，确保Redis服务已启动
-- 生产环境推荐使用Redis以获得更好的性能
-- Redis密码应使用强密码，确保安全
-- 定期监控Redis内存使用情况
-- 可以通过Redis CLI命令管理缓存：`redis-cli FLUSHALL` 清空所有缓存
+- 手动题库存储在 `manual_question_bank.json` 文件中
+- `note` 字段仅作为备注，不会嵌入回答

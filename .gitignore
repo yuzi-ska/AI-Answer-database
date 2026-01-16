@@ -24,29 +24,66 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Project specific
+# 项目配置（包含敏感信息）
 .env
+.env.local
+.env.*.local
+
+# 数据库文件（包含所有答题记录）
 *.db
-*.log
-logs/
+*.sqlite
+*.sqlite3
 ocs_api.db
 
-# Test files
+# 日志文件
+*.log
+logs/
+*.log.*
+
+# 手动题库（包含自定义答案）
+manual_question_bank.json
+
+# 测试文件（可能包含API密钥）
 test_*.py
 *_test.py
+test_external_api.py
+
+# 清理脚本
 clear_database.py
+clear_*.py
+
+# 待删除的文件目录
+del_file/
+trash/
 
 # Docker
 .env.docker
 docker-compose.override.yml
+Dockerfile
+docker-compose.yml
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*.backup
+*~
+
+# 上传的文件
+uploads/
+upload/
+files/
