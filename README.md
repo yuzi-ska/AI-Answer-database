@@ -1,6 +1,6 @@
 # OCS网课助手AI+题库API
 
-基于AI和题库的智能答题API，兼容OCS网课助手的AnswererWrapper接口。
+基于AI和手动题库的智能答题API，兼容OCS网课助手的AnswererWrapper接口。
 
 ## 使用须知
 
@@ -9,14 +9,13 @@
 
 ## 功能特点
 
-- AI+题库混合答题
+- AI+手动题库混合答题
 - 支持OpenAI兼容接口（OpenAI、DeepSeek、通义千问等）
 - 兼容OCS AnswererWrapper接口
 - 支持GET请求方式
 - 异步高并发处理
 - **手动题库管理**（JSON文件存储），预防一些刁难题目
 - 实时查询
-- 灵活的题库配置
 - 统一的响应格式标准
 
 ## 安装和运行
@@ -57,16 +56,6 @@ AI_MODEL_BASE_URL=https://api.openai.com/v1
 # 智能体配置
 AI_AGENT_PROMPT=你的AI提示词
 
-# OCS题库配置
-# 单个题库配置示例
-# QUESTION_BANK_CONFIG=[{"url":"https://api.example.com/search?q=${title}","name":"示例题库","method":"get","contentType":"json","handler":"return (res)=> res.code === 200 ? [res.data.question, res.data.answer] : undefined"}]
-
-# 多个题库配置示例（取消注释使用）
-# QUESTION_BANK_CONFIG=[{"url":"https://api.xinghuo.com/search?q=${title}","name":"星火题库","method":"get","contentType":"json","headers":{"Authorization":"Bearer your-api-key"},"handler":"return (res)=> res.code === 200 ? [res.data.question, res.data.answer] : undefined"},{"url":"https://api.xueersi.com/v1/question/search","name":"学而思题库","method":"post","contentType":"json","data":{"question":"${title}","type":"${type}"},"headers":{"X-API-Key":"your-api-key"},"handler":"return (res)=> res.status === 'success' && res.data ? [res.data.question, res.data.answer] : undefined"}]
-
-# 题库查询超时时间（秒）
-QUESTION_BANK_TIMEOUT=10
-
 # 日志
 LOG_LEVEL=INFO
 LOG_FILE_PATH=logs/ocs_api.log
@@ -77,8 +66,6 @@ ALLOWED_ORIGINS=*
 # API接口配置
 API_VERSION=v1
 API_PREFIX=/api
-ENABLE_DOCS=true
-ENABLE_REDOC=true
 
 # 响应配置
 RESPONSE_CODE_SUCCESS=1
@@ -91,24 +78,10 @@ RESPONSE_CODE_ERROR=0
 
 - **GET** `/health` - 主应用状态
 - **GET** `/api/v1/health` - API模块状态
-- **GET** `/api/v1/config/example` - 获取配置示例
-- **GET** `/api/v1/status` - 获取题库状态
-
-### 手动题库管理
-
-- **GET** `/api/v1/manual-bank` - 获取手动题库内容
-- **POST** `/api/v1/manual-bank/add` - 添加题目
-- **DELETE** `/api/v1/manual-bank/remove` - 删除题目
-- **DELETE** `/api/v1/manual-bank/clear` - 清空手动题库
 
 ### 搜索接口
 
 - **GET** `/api/v1/search` - OCS题库搜索接口
-
-### API文档
-
-- **GET** `/docs` - Swagger UI文档（可配置开关）
-- **GET** `/redoc` - ReDoc文档（可配置开关）
 
 ## 响应格式说明
 
@@ -134,6 +107,21 @@ RESPONSE_CODE_ERROR=0
 {
   "code": 0,
   "results": []
+}
+```
+
+### 单选题响应
+```json
+{
+  "code": 1,
+  "results": [
+    {
+      "question": "问题内容",
+      "question_type": "single",
+      "options": "A.选项1\nB.选项2\nC.选项3\nD.选项4",
+      "answer": "A"
+    }
+  ]
 }
 ```
 
@@ -196,11 +184,10 @@ RESPONSE_CODE_ERROR=0
 
 ## 查询优先级
 
-每次请求都**实时查询**，不使用缓存：
+**无缓存配置，需手动在网关缓存**
 
 1. **手动题库**（最高优先级）- 存储在 `manual_question_bank.json`
-2. **OCS题库** - 外部题库接口
-3. **AI模型** - 最后的答案来源
+2. **AI模型** - 最后的答案来源
 
 ## 手动题库
 
@@ -292,23 +279,11 @@ RESPONSE_CODE_ERROR=0
 
 ### 管理命令
 
-```bash
-# 添加题目
-curl -X POST "http://localhost:8000/api/v1/manual-bank/add?question=1+1等于几&answer=2"
-
-# 查看题库
-curl http://localhost:8000/api/v1/manual-bank
-
-# 删除题目
-curl -X DELETE "http://localhost:8000/api/v1/manual-bank/remove?question=1+1等于几"
-
-# 清空题库
-curl -X DELETE http://localhost:8000/api/v1/manual-bank/clear
-```
+手动题库存储在 `manual_question_bank.json` 文件中，可以直接编辑该文件来管理题库。
 
 ### 直接编辑文件
 
-也可以直接编辑 `manual_question_bank.json` 文件：
+**推荐方式**：直接编辑 `manual_question_bank.json` 文件来管理题库：
 
 ```json
 {
@@ -320,46 +295,6 @@ curl -X DELETE http://localhost:8000/api/v1/manual-bank/clear
 ```
 
 编辑后无需重启服务，题目会立即生效。
-
-## OCS题库配置格式
-
-### 基本格式
-
-```json
-[
-  {
-    "url": "http://localhost:8000/api/search?q=${title}",
-    "name": "本地题库",
-    "method": "get",
-    "contentType": "json",
-    "handler": "return (res)=> res.code === 1 && res.results.length > 0 ? [res.results[0].question, res.results[0].answer] : undefined"
-  }
-]
-```
-
-### 字段说明
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| url | string | 是 | 请求URL，支持占位符 |
-| name | string | 是 | 题库名称 |
-| handler | string | 是 | JavaScript处理函数 |
-| method | string | 否 | get/post，默认get |
-| contentType | string | 否 | json/text，默认json |
-| headers | object | 否 | 请求头 |
-| data | object | 否 | POST请求体（支持占位符） |
-
-### 占位符说明
-
-- `${title}` - 题目内容
-- `${type}` - 题目类型（single/multiple/completion/judgment）
-- `${options}` - 选项内容
-
-### Handler函数
-
-返回格式：
-- 单个结果：`[题目, 答案]`
-- 无结果：`undefined`
 
 ## OCS网课助手配置
 
@@ -386,14 +321,8 @@ curl "http://localhost:8000/api/v1/search?q=1+1等于几&type=single&options=A.1
 # 测试搜索接口（选择题）
 curl "http://localhost:8000/api/v1/search?q=中国的首都是哪里&type=single&options=A.上海+B.北京+C.广州+D.深圳"
 
-# 获取配置示例
-curl http://localhost:8000/api/v1/config/example
-
 # 健康检查
 curl http://localhost:8000/health
-
-# 查看手动题库
-curl http://localhost:8000/api/v1/manual-bank
 ```
 
 ## AI回答模式
@@ -409,7 +338,6 @@ curl http://localhost:8000/api/v1/manual-bank
 
 ## 注意事项
 
-- 确保OCS题库URL可访问
 - 请确定AI API密钥和请求地址正确
 - **每次请求都实时查询，不使用缓存**
 - 推荐使用GET接口，简洁高效

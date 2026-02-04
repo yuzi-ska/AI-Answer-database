@@ -10,10 +10,10 @@ from app.core.config import settings
 # 创建FastAPI应用
 app = FastAPI(
     title="OCS网课助手AI+题库API",
-    description="基于AI和题库的智能答题API（实时查询模式）",
+    description="基于AI和手动题库的智能答题API（实时查询模式）",
     version="2.0.0",
-    docs_url="/docs" if settings.ENABLE_DOCS else None,
-    redoc_url="/redoc" if settings.ENABLE_REDOC else None
+    docs_url=None,
+    redoc_url=None
 )
 
 # 配置CORS中间件

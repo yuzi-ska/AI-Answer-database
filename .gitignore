@@ -26,6 +26,19 @@ env/
 ENV/
 .venv/
 
+# Python tooling/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+coverage.xml
+htmlcov/
+pip-wheel-metadata/
+pip-log.txt
+*.pytest.log
+
 # IDE
 .vscode/
 .idea/
@@ -38,10 +51,22 @@ ENV/
 Thumbs.db
 desktop.ini
 
+# Editor/IDE extras
+.vs/
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+*.iml
+
 # 项目配置（包含敏感信息）
 .env
 .env.local
 .env.*.local
+.envrc
+
+# 更新日志（本地文档，不上传）
+UPDATE_LOG.md
+CHANGELOG_LOCAL.md
 
 # 数据库文件（包含所有答题记录）
 *.db
@@ -82,6 +107,14 @@ docker-compose.yml
 *.bak
 *.backup
 *~
+
+# Cache directories
+.cache/
+
+# Logs (additional)
+*.log.gz
+*.log.bz2
+*.log.zip
 
 # 上传的文件
 uploads/
