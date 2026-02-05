@@ -1,12 +1,13 @@
 """
 OCS网课助手答题处理器
 支持手动题库→AI的查询顺序（不保存结果到数据库/缓存）
-每次请求都实时查询，不使用缓存
+手动题库在读取3次后缓存到内存，并监控文件变化自动更新缓存
 """
 import asyncio
 import aiohttp
 import json
 import os
+import threading
 from typing import Optional, Dict, Any
 from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
@@ -14,21 +15,108 @@ from app.utils.logger import logger
 from app.utils.question_detector import detect_question_type, clean_question_text, normalize_answer_for_type
 from app.utils.http_client import get_http_session
 
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    WATCHDOG_AVAILABLE = True
+except ImportError:
+    WATCHDOG_AVAILABLE = False
+    logger.warning("watchdog 未安装，文件监控功能不可用。请运行: pip install watchdog")
+
 
 # 手动题库文件路径
 MANUAL_QUESTION_BANK_PATH = "manual_question_bank.json"
 
+# 缓存相关变量
+_question_bank_cache: Optional[Dict[str, Dict[str, str]]] = None
+_cache_read_count: int = 0
+_cache_threshold: int = 3  # 读取3次后启用缓存
+_cache_lock = threading.Lock()
+_file_observer: Optional[Any] = None
+
+
+class QuestionBankFileHandler(FileSystemEventHandler):
+    """手动题库文件变化处理器"""
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        # 检查是否是目标文件
+        if os.path.basename(event.src_path) == os.path.basename(MANUAL_QUESTION_BANK_PATH):
+            logger.info(f"检测到手动题库文件变化，重新加载缓存: {event.src_path}")
+            _reload_cache()
+
+
+def _reload_cache():
+    """重新加载缓存"""
+    global _question_bank_cache
+    with _cache_lock:
+        try:
+            if os.path.exists(MANUAL_QUESTION_BANK_PATH):
+                with open(MANUAL_QUESTION_BANK_PATH, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    _question_bank_cache = data if isinstance(data, dict) else {}
+                    logger.info(f"手动题库缓存已更新，共 {len(_question_bank_cache)} 条记录")
+            else:
+                _question_bank_cache = {}
+        except Exception as e:
+            logger.error(f"重新加载手动题库缓存失败: {e}")
+
+
+def _start_file_watcher():
+    """启动文件监控"""
+    global _file_observer
+    if not WATCHDOG_AVAILABLE:
+        logger.warning("watchdog 不可用，无法启动文件监控")
+        return
+
+    if _file_observer is not None:
+        return  # 已经启动
+
+    try:
+        watch_path = os.path.dirname(os.path.abspath(MANUAL_QUESTION_BANK_PATH)) or "."
+        event_handler = QuestionBankFileHandler()
+        _file_observer = Observer()
+        _file_observer.schedule(event_handler, watch_path, recursive=False)
+        _file_observer.daemon = True
+        _file_observer.start()
+        logger.info(f"已启动手动题库文件监控: {watch_path}")
+    except Exception as e:
+        logger.error(f"启动文件监控失败: {e}")
+
 
 def load_manual_question_bank() -> Dict[str, Dict[str, str]]:
-    """加载手动题库"""
-    try:
-        if os.path.exists(MANUAL_QUESTION_BANK_PATH):
-            with open(MANUAL_QUESTION_BANK_PATH, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                return data if isinstance(data, dict) else {}
-    except Exception as e:
-        logger.error(f"加载手动题库失败: {e}")
-    return {}
+    """加载手动题库（带缓存机制）"""
+    global _question_bank_cache, _cache_read_count
+
+    with _cache_lock:
+        # 如果已有缓存，直接返回
+        if _question_bank_cache is not None:
+            logger.debug("从内存缓存读取手动题库")
+            return _question_bank_cache
+
+        # 增加读取计数
+        _cache_read_count += 1
+
+        try:
+            if os.path.exists(MANUAL_QUESTION_BANK_PATH):
+                with open(MANUAL_QUESTION_BANK_PATH, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    result = data if isinstance(data, dict) else {}
+
+                    # 达到阈值后启用缓存
+                    if _cache_read_count >= _cache_threshold:
+                        _question_bank_cache = result
+                        logger.info(f"手动题库已缓存到内存（第 {_cache_read_count} 次读取），共 {len(result)} 条记录")
+                        # 启动文件监控
+                        _start_file_watcher()
+                    else:
+                        logger.debug(f"从文件读取手动题库（第 {_cache_read_count}/{_cache_threshold} 次）")
+
+                    return result
+        except Exception as e:
+            logger.error(f"加载手动题库失败: {e}")
+        return {}
 
 
 def query_manual_question_bank_sync(question_context: OCSQuestionContext) -> Optional[Dict[str, Any]]:
