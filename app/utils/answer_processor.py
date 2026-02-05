@@ -12,6 +12,7 @@ from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
 from app.utils.logger import logger
 from app.utils.question_detector import detect_question_type, clean_question_text, normalize_answer_for_type
+from app.utils.http_client import get_http_session
 
 
 # 手动题库文件路径
@@ -221,29 +222,29 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
 
         logger.info(f"AI请求: 模型={settings.AI_MODEL_NAME}, 类型={q_type}, max_tokens={max_tokens}")
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{settings.AI_MODEL_BASE_URL}/chat/completions",
-                headers=headers,
-                json=data,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    answer = result['choices'][0]['message']['content'].strip()
-                    logger.info(f"AI返回的原始答案: 类型={q_type}, 答案={answer}")
+        session = await get_http_session()
+        async with session.post(
+            f"{settings.AI_MODEL_BASE_URL}/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status == 200:
+                result = await response.json()
+                answer = result['choices'][0]['message']['content'].strip()
+                logger.info(f"AI返回的原始答案: 类型={q_type}, 答案={answer}")
 
-                    return {
-                        "question": question_context.title,
-                        "answer": answer,
-                        "source": "ai",
-                        "confidence": 0.8,
-                        "metadata": {"model": settings.AI_MODEL_NAME, "question_type": q_type}
-                    }
-                else:
-                    error_text = await response.text()
-                    logger.error(f"AI API请求失败: 状态码={response.status}, 响应={error_text}")
-                    return None
+                return {
+                    "question": question_context.title,
+                    "answer": answer,
+                    "source": "ai",
+                    "confidence": 0.8,
+                    "metadata": {"model": settings.AI_MODEL_NAME, "question_type": q_type}
+                }
+            else:
+                error_text = await response.text()
+                logger.error(f"AI API请求失败: 状态码={response.status}, 响应={error_text}")
+                return None
     except Exception as e:
         logger.error(f"AI查询出错: {e}")
         return None

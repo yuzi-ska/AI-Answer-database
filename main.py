@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import answer
 from app.core.config import settings
+from app.utils.http_client import init_http_session, close_http_session
 
 # 创建FastAPI应用
 app = FastAPI(
@@ -28,6 +29,16 @@ app.add_middleware(
 # 注册路由
 app.include_router(answer.router, prefix=f"{settings.API_PREFIX}/{settings.API_VERSION}", tags=["answer"])
 app.include_router(answer.router, prefix=settings.API_PREFIX, tags=["answer"])
+
+
+@app.on_event("startup")
+async def startup_event():
+    await init_http_session()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_http_session()
 
 @app.get("/")
 @app.head("/")
