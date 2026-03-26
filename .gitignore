@@ -42,8 +42,13 @@ pip-log.txt
 # IDE
 .vscode/
 .idea/
+.vs/
 *.swp
 *.swo
+*.sublime-workspace
+*.sublime-project
+*.code-workspace
+*.iml
 *~
 
 # OS
@@ -51,72 +56,55 @@ pip-log.txt
 Thumbs.db
 desktop.ini
 
-# Editor/IDE extras
-.vs/
-*.sublime-workspace
-*.sublime-project
-*.code-workspace
-*.iml
+# Local Claude/OMC artifacts
+.claude/settings.local.json
+.omc/
 
-# 项目配置（包含敏感信息）
+# Project config with secrets
 .env
 .env.local
+.env.*
+!.env.example
 .env.*.local
 .envrc
 
-# 更新日志（本地文档，不上传）
+# Local docs
 UPDATE_LOG.md
 CHANGELOG_LOCAL.md
 
-# 数据库文件（包含所有答题记录）
+# Local databases
 *.db
 *.sqlite
 *.sqlite3
 ocs_api.db
 
-# 日志文件
+# Logs
 *.log
-logs/
 *.log.*
-
-# 手动题库（包含自定义答案）
-manual_question_bank.json
-
-# 测试文件（可能包含API密钥）
-test_*.py
-*_test.py
-test_external_api.py
-
-# 清理脚本
-clear_database.py
-clear_*.py
-
-# 待删除的文件目录
-del_file/
-trash/
-
-# Docker
-.env.docker
-docker-compose.override.yml
-Dockerfile
-docker-compose.yml
-
-# 临时文件
-*.tmp
-*.temp
-*.bak
-*.backup
-*~
-
-# Cache directories
-.cache/
-
-# Logs (additional)
+logs/
 *.log.gz
 *.log.bz2
 *.log.zip
 
-# 上传的文件
+# Private/local data
+manual_question_bank.json
 uploads/
 upload/
 files/
+
+# Pending deletion directories
+del_file/
+trash/
+
+# Docker local overrides
+.env.docker
+docker-compose.override.yml
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Cache directories
+.cache/
