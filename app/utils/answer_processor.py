@@ -12,7 +12,7 @@ from typing import Optional, Dict, Any
 from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
 from app.utils.logger import logger
-from app.utils.question_detector import detect_question_type, clean_question_text, normalize_answer_for_type
+from app.utils.question_detector import detect_question_type, clean_question_text, normalize_answer_for_type, normalize_question_type
 from app.utils.http_client import get_http_session
 
 try:
@@ -207,12 +207,15 @@ async def process_question_with_multi_layer(
 ) -> Optional[Dict[str, Any]]:
     """多层查询：手动题库 -> AI"""
     clean_title = clean_question_text(question_context.title)
-    clean_options = question_context.options or ""
+    clean_options = clean_question_text(question_context.options) if question_context.options else ""
 
+    normalized_input_type = normalize_question_type(question_context.type)
     detected_type = detect_question_type(clean_title, clean_options)
-    final_type = question_context.type if question_context.type else detected_type
+    final_type = normalized_input_type or detected_type
+    if detected_type == "judgment" and normalized_input_type in ["", "single"]:
+        final_type = "judgment"
 
-    logger.info(f"题目类型检测: 原始类型={question_context.type}, 检测类型={detected_type}, 最终类型={final_type}")
+    logger.info(f"题目类型检测: 原始类型={question_context.type}, 归一化类型={normalized_input_type}, 检测类型={detected_type}, 最终类型={final_type}")
 
     updated_context = OCSQuestionContext(
         title=clean_title,
@@ -236,7 +239,8 @@ async def process_question_with_multi_layer(
 
             if result:
                 # 如果手动题库返回了题型，优先使用返回的题型
-                result_type = result.get('question_type') or updated_context.type
+                result_type = normalize_question_type(result.get('question_type') or updated_context.type) or updated_context.type
+                result['question_type'] = result_type
                 result['answer'] = normalize_answer_for_type(
                     result['answer'],
                     result_type,
@@ -266,7 +270,7 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
         }
 
         # 根据题目类型配置提示词
-        q_type = question_context.type.lower() if question_context.type else ""
+        q_type = normalize_question_type(question_context.type) or (question_context.type.lower() if question_context.type else "")
 
         if q_type == "completion":
             # 填空题

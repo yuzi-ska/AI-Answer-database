@@ -2,81 +2,142 @@
 题目类型识别工具
 """
 import re
-from typing import Optional
+from typing import List
+
+
+QUESTION_TYPE_ALIASES = {
+    "single": "single",
+    "singlechoice": "single",
+    "singlequestion": "single",
+    "单选": "single",
+    "单选题": "single",
+    "multiple": "multiple",
+    "multiplechoice": "multiple",
+    "multiplequestion": "multiple",
+    "多选": "multiple",
+    "多选题": "multiple",
+    "completion": "completion",
+    "fill": "completion",
+    "fillblank": "completion",
+    "blank": "completion",
+    "填空": "completion",
+    "填空题": "completion",
+    "judgment": "judgment",
+    "judgement": "judgment",
+    "judge": "judgment",
+    "boolean": "judgment",
+    "truefalse": "judgment",
+    "tf": "judgment",
+    "对错": "judgment",
+    "是非": "judgment",
+    "判断": "judgment",
+    "判断题": "judgment",
+}
+
+
+def normalize_question_type(question_type: str) -> str:
+    """将外部题型归一化为内部标准值"""
+    if not question_type:
+        return ""
+
+    normalized = re.sub(r"[\s\-_/]+", "", question_type).lower()
+    return QUESTION_TYPE_ALIASES.get(normalized, "")
+
+
+def _extract_option_values(options: str) -> List[str]:
+    normalized_options = clean_question_text(options)
+    if not normalized_options:
+        return []
+
+    parts = re.split(r'(?:^|[\s\r\n]+)[A-Z][\.、:：\)]\s*', normalized_options, flags=re.IGNORECASE)
+    values = [part.strip().lower() for part in parts if part.strip()]
+    if len(values) > 1:
+        return values
+
+    line_values = [part.strip().lower() for part in normalized_options.splitlines() if part.strip()]
+    if len(line_values) > 1:
+        return line_values
+
+    separator_values = [part.strip().lower() for part in re.split(r'[；;#|/]', normalized_options) if part.strip()]
+    if len(separator_values) > 1:
+        return separator_values
+
+    return values
+
+
+def _has_judgment_options(options: str) -> bool:
+    option_values = _extract_option_values(options)
+    if len(option_values) != 2:
+        return False
+
+    option_set = {value.strip() for value in option_values}
+    judgment_option_sets = [
+        {"对", "错"},
+        {"正确", "错误"},
+        {"true", "false"},
+        {"t", "f"},
+        {"√", "×"},
+        {"是", "否"},
+        {"yes", "no"},
+    ]
+    return option_set in judgment_option_sets
 
 
 def detect_question_type(question: str, options: str = "") -> str:
     """
     智能检测题目类型
-    
+
     Args:
         question: 题目内容
         options: 选项内容（如果有）
-    
+
     Returns:
         题目类型: single, multiple, judgment, completion
     """
-    question = question.strip()
-    
-    # 1. 如果有选项，优先判断为选择题
-    if options and options.strip():
-        # 检查是否是多选题
-        if re.search(r'[（\(][\s多选\s][）\)]', question) or re.search(r'[多选]', question):
-            return "multiple"
-        
-        # 检查是否是判断题
-        if re.search(r'[（\(][\s判断\s][）\)]', question) or re.search(r'[判断]', question):
-            return "judgment"
-        
-        # 检查是否是单选题
-        if re.search(r'[（\(][\s单选\s][）\)]', question) or re.search(r'[单选]', question):
-            return "single"
-        
-        # 如果有选项但没有明确标识，默认为单选题
+    question = clean_question_text(question).strip()
+    normalized_options = clean_question_text(options) if options else ""
+
+    if question.startswith('【单选题】') or question.startswith('(单选题)') or question.startswith('（单选题）'):
         return "single"
-    
-    # 2. 根据题目内容判断题型
-    
-    # 填空题检测 - 查找填空标记
+
+    if question.startswith('【多选题】') or question.startswith('(多选题)') or question.startswith('（多选题）'):
+        return "multiple"
+
+    if question.startswith('【判断题】') or question.startswith('(判断题)') or question.startswith('（判断题）'):
+        return "judgment"
+
+    if question.startswith('【填空题】') or question.startswith('(填空题)') or question.startswith('（填空题）'):
+        return "completion"
+
+    # 如果有选项，优先判断选择/判断题
+    if normalized_options:
+        if "多选" in question:
+            return "multiple"
+
+        if "判断" in question or _has_judgment_options(normalized_options):
+            return "judgment"
+
+        if "单选" in question:
+            return "single"
+
+        return "single"
+
+    # 根据题目内容判断题型
     if re.search(r'_{3,}', question) or re.search(r'（\s*\）', question) or re.search(r'\(\s*\)', question):
         return "completion"
-    
-    # 判断题检测
-    if re.search(r'[（\(][\s判断\s][）\)]', question) or re.search(r'[对错]|正确|错误|是否|对吗', question):
+
+    if "判断" in question or re.search(r'对错|正确|错误|是否|对吗', question):
         return "judgment"
-    
-    # 多选题检测
-    if re.search(r'[（\(][\s多选\s][）\)]', question) or re.search(r'[多选]', question):
+
+    if "多选" in question:
         return "multiple"
-    
-    # 单选题检测
-    if re.search(r'[（\(][\s单选\s][）\)]', question) or re.search(r'[单选]', question):
+
+    if "单选" in question:
         return "single"
-    
-    # 3. 根据题目格式判断
-    
-    # 如果题目以"【单选题】"开头
-    if question.startswith('【单选题】') or question.startswith('(单选题)'):
-        return "single"
-    
-    # 如果题目以"【多选题】"开头
-    if question.startswith('【多选题】') or question.startswith('(多选题)'):
-        return "multiple"
-    
-    # 如果题目以"【判断题】"开头
-    if question.startswith('【判断题】') or question.startswith('(判断题)'):
-        return "judgment"
-    
-    # 如果题目以"【填空题】"开头
-    if question.startswith('【填空题】') or question.startswith('(填空题)'):
-        return "completion"
-    
-    # 4. 默认判断
-    # 如果题目中有填空标记，认为是填空题
+
     if re.search(r'_{2,}|\(\s*\)|（\s*\）', question):
         return "completion"
-    
-    # 如果没有明确标识且没有选项，默认为填空题
+
     return "completion"
 
 
@@ -155,7 +216,7 @@ def normalize_answer_for_type(answer: str, question_type: str, options: str = ""
         return ""
     
     answer = answer.strip()
-    q_type = question_type.lower() if question_type else ""
+    q_type = normalize_question_type(question_type) or (question_type.lower() if question_type else "")
     
     # 单选题 - 只返回选项字母
     if q_type == "single":

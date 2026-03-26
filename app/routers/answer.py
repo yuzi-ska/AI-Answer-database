@@ -7,6 +7,7 @@ from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
 from app.utils.answer_processor import process_question_with_multi_layer
 from app.utils.logger import logger
+from app.utils.question_detector import clean_question_text, normalize_answer_for_type, normalize_question_type
 
 router = APIRouter()
 
@@ -20,7 +21,7 @@ async def api_health():
 
 @router.get("/search")
 @router.head("/search")
-async def search_question(q: str = "", type: str = "single", options: str = ""):
+async def search_question(q: str = "", type: str = "", options: str = ""):
     """
     OCS题库搜索接口 - 兼容OCS的搜索请求
     返回OCS标准格式
@@ -30,23 +31,25 @@ async def search_question(q: str = "", type: str = "single", options: str = ""):
     2. AI回答（兜底）
     """
     try:
-        from app.schemas.answer import OCSQuestionContext
-        from app.utils.question_detector import clean_question_text, normalize_answer_for_type
+        from urllib.parse import unquote
 
         # 输入验证
         if len(q) > 1000:
             raise HTTPException(status_code=400, detail="问题长度不能超过1000字符")
         if len(options) > 2000:
             raise HTTPException(status_code=400, detail="选项长度不能超过2000字符")
-        if type not in ["single", "multiple", "completion", "judgment"]:
-            raise HTTPException(status_code=400, detail="无效的题目类型")
 
         # 处理URL编码
-        from urllib.parse import unquote
         if q:
             q = unquote(q)
+        if type:
+            type = unquote(type)
         if options:
             options = unquote(options)
+
+        normalized_type = normalize_question_type(type) if type else ""
+        if type and normalized_type not in ["single", "multiple", "completion", "judgment"]:
+            raise HTTPException(status_code=400, detail="无效的题目类型")
 
         # 清理题目文本
         clean_q = clean_question_text(q)
@@ -55,11 +58,11 @@ async def search_question(q: str = "", type: str = "single", options: str = ""):
         # 构建OCS兼容的上下文
         question_context = OCSQuestionContext(
             title=clean_q,
-            type=type,
+            type=normalized_type,
             options=clean_options
         )
 
-        logger.info(f"OCS搜索请求: {clean_q[:50]}..., 类型: {type}")
+        logger.info(f"OCS搜索请求: {clean_q[:50]}..., 类型: {type} -> {normalized_type}")
 
         # 使用多层查询架构获取答案（实时查询，不缓存）
         result = await process_question_with_multi_layer(
@@ -80,7 +83,7 @@ async def search_question(q: str = "", type: str = "single", options: str = ""):
         logger.info(f"OCS搜索成功，来源: {result['source']}, 问题: {clean_q[:50]}...")
 
         # 获取实际的题目类型（可能经过智能检测修正）
-        actual_type = result.get('question_type', type)
+        actual_type = normalize_question_type(result.get('question_type')) or normalized_type
         actual_options = result.get('options', clean_options)
 
         # 根据实际题型格式化答案
