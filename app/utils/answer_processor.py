@@ -244,6 +244,22 @@ def _get_thinking_budget(question_context: OCSQuestionContext, default_budget: i
     return default_budget
 
 
+def _get_max_output_tokens(default_value: int = 1000) -> int:
+    configured_value = getattr(settings, "AI_MAX_OUTPUT_TOKENS", default_value)
+    if isinstance(configured_value, int) and configured_value > 0:
+        return configured_value
+    return default_value
+
+
+def _openai_supports_reasoning_none(model_name: str) -> bool:
+    normalized_name = (model_name or "").strip().lower()
+    if not normalized_name.startswith("gpt-5"):
+        return False
+    if normalized_name.startswith("gpt-5."):
+        return True
+    return False
+
+
 def _structured_output_enabled(question_context: OCSQuestionContext) -> bool:
     return bool(question_context.structured_output and settings.AI_ENABLE_STRUCTURED_OUTPUT_PARAMS)
 
@@ -261,7 +277,18 @@ def _join_url(base_url: str, path: str) -> str:
 
 
 def _dashscope_endpoint(base_url: str) -> str:
-    return _join_url(base_url, "services/aigc/text-generation/generation")
+    base = (base_url or "").rstrip("/")
+    full_suffix = "api/v1/services/aigc/text-generation/generation"
+    path_suffix = "services/aigc/text-generation/generation"
+
+    if base.endswith(full_suffix):
+        return base
+    if base.endswith(path_suffix):
+        base_root = base[:-len(path_suffix)].rstrip("/")
+        return _join_url(base_root, full_suffix)
+    if base.endswith("api/v1"):
+        return _join_url(base, path_suffix)
+    return _join_url(base, full_suffix)
 
 
 def _anthropic_endpoint(base_url: str) -> str:
@@ -274,6 +301,90 @@ def _openai_chat_endpoint(base_url: str) -> str:
 
 def _openai_responses_endpoint(base_url: str) -> str:
     return _join_url(base_url, "responses")
+
+
+def _apply_openai_chat_thinking_settings(data: Dict[str, Any], question_context: OCSQuestionContext) -> str:
+    thinking_value = _get_thinking_value(question_context)
+    if thinking_value is None:
+        return "not_forwarded"
+    if thinking_value is True:
+        data["reasoning_effort"] = "high"
+        return "enabled"
+    if _openai_supports_reasoning_none(settings.AI_MODEL_NAME):
+        data["reasoning_effort"] = "none"
+        return "disabled"
+    logger.info(f"OpenAI Chat 当前模型不支持 reasoning_effort=none，跳过关闭思考字段: model={settings.AI_MODEL_NAME}")
+    return "disable_unsupported_skipped"
+
+
+def _apply_openai_responses_thinking_settings(data: Dict[str, Any], question_context: OCSQuestionContext) -> str:
+    thinking_value = _get_thinking_value(question_context)
+    if thinking_value is None:
+        return "not_forwarded"
+    if thinking_value is True:
+        data["reasoning"] = {"effort": "high"}
+        return "enabled"
+    if _openai_supports_reasoning_none(settings.AI_MODEL_NAME):
+        data["reasoning"] = {"effort": "none"}
+        return "disabled"
+    logger.info(f"OpenAI Responses 当前模型不支持 reasoning.effort=none，跳过关闭思考字段: model={settings.AI_MODEL_NAME}")
+    return "disable_unsupported_skipped"
+
+
+def _apply_dashscope_thinking_settings(parameters: Dict[str, Any], question_context: OCSQuestionContext) -> str:
+    thinking_value = _get_thinking_value(question_context)
+    if thinking_value is None:
+        return "not_forwarded"
+    parameters["enable_thinking"] = thinking_value
+    return "enabled" if thinking_value else "disabled"
+
+
+def _apply_anthropic_thinking_settings(data: Dict[str, Any], max_tokens: int, question_context: OCSQuestionContext) -> tuple[int, str]:
+    thinking_value = _get_thinking_value(question_context)
+    if thinking_value is None:
+        return max_tokens, "not_forwarded"
+    if thinking_value is True:
+        thinking_budget = _get_thinking_budget(question_context)
+        request_max_tokens = max(max_tokens, thinking_budget + 1)
+        data["max_tokens"] = request_max_tokens
+        data["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": min(thinking_budget, request_max_tokens - 1)
+        }
+        data["temperature"] = 1
+        return request_max_tokens, "enabled"
+    data["thinking"] = {
+        "type": "disabled"
+    }
+    return max_tokens, "disabled"
+
+
+def _describe_thinking_payload(provider: str, data: Dict[str, Any]) -> str:
+    if provider == "openai_chat_completions":
+        return str(data.get("reasoning_effort", "not_forwarded"))
+    if provider == "openai_responses":
+        reasoning = data.get("reasoning") or {}
+        return str(reasoning.get("effort", "not_forwarded"))
+    if provider == "dashscope":
+        parameters = data.get("parameters") or {}
+        return str(parameters.get("enable_thinking", "not_forwarded"))
+    if provider == "anthropic":
+        thinking = data.get("thinking") or {}
+        return str(thinking.get("type", "not_forwarded"))
+    return "unknown"
+
+
+def _extract_request_max_tokens(provider: str, data: Dict[str, Any]) -> Optional[int]:
+    if provider == "openai_chat_completions":
+        return data.get("max_tokens")
+    if provider == "openai_responses":
+        return data.get("max_output_tokens")
+    if provider == "dashscope":
+        parameters = data.get("parameters") or {}
+        return parameters.get("max_tokens")
+    if provider == "anthropic":
+        return data.get("max_tokens")
+    return None
 
 
 def _extract_text_value(value: Any) -> str:
@@ -488,31 +599,27 @@ def _build_structured_prompt(system_prompt: str) -> str:
 
 def _build_ai_prompt(question_context: OCSQuestionContext) -> tuple[str, str, str, int]:
     q_type = normalize_question_type(question_context.type) or (question_context.type.lower() if question_context.type else "")
+    max_tokens = _get_max_output_tokens()
 
     if q_type == "completion":
         system_prompt = "你是OCS网课助手AI答题系统。这是一道填空题，请直接回答填空处的内容，不要进行任何解释或讲解。不要返回选项字母，只返回填空的答案内容。"
         user_content = f"【填空题】问题：{question_context.title}"
         if question_context.options:
             user_content += f"\n参考选项：{question_context.options}"
-        max_tokens = 100
     elif q_type == "single":
         system_prompt = "你是OCS网课助手AI答题系统。这是一道单选题，请仔细分析题目和选项，直接回答正确选项的字母（如A、B、C、D）。只返回选项字母，不要返回选项内容，不要有任何解释。"
         user_content = f"【单选题】问题：{question_context.title}\n选项：{question_context.options}" if question_context.options else f"【单选题】问题：{question_context.title}"
-        max_tokens = 20
     elif q_type == "multiple":
         system_prompt = "你是OCS网课助手AI答题系统。这是一道多选题，请仔细分析题目和选项，直接回答所有正确选项的字母，用#号连接（如A#B#C）。只返回选项字母，不要返回选项内容，不要有任何解释。"
         user_content = f"【多选题】问题：{question_context.title}\n选项：{question_context.options}" if question_context.options else f"【多选题】问题：{question_context.title}"
-        max_tokens = 50
     elif q_type == "judgment":
         system_prompt = "你是OCS网课助手AI答题系统。这是一道判断题，请直接回答'对'或'错'。只返回一个字，不要有任何解释。"
         user_content = f"【判断题】问题：{question_context.title}"
-        max_tokens = 10
     else:
         system_prompt = "你是OCS网课助手AI答题系统。请根据题目类型回答问题。如果是填空题，只返回填空内容；如果是选择题，只返回选项字母；如果是判断题，只回答'对'或'错'。"
         user_content = f"问题：{question_context.title}"
         if question_context.options:
             user_content += f"\n选项：{question_context.options}"
-        max_tokens = 100
 
     if _structured_output_enabled(question_context):
         system_prompt = _build_structured_prompt(system_prompt)
@@ -535,9 +642,7 @@ def _build_openai_chat_request(system_prompt: str, user_content: str, max_tokens
         "temperature": 0.1
     }
 
-    thinking_value = _get_thinking_value(question_context)
-    if thinking_value is not None:
-        data["reasoning_effort"] = "high" if thinking_value else "none"
+    _apply_openai_chat_thinking_settings(data, question_context)
     if _structured_output_enabled(question_context):
         data["response_format"] = {
             "type": "json_schema",
@@ -566,9 +671,7 @@ def _build_openai_responses_request(system_prompt: str, user_content: str, max_t
         "temperature": 0.1
     }
 
-    thinking_value = _get_thinking_value(question_context)
-    if thinking_value is not None:
-        data["reasoning"] = {"effort": "high" if thinking_value else "none"}
+    _apply_openai_responses_thinking_settings(data, question_context)
     if _structured_output_enabled(question_context):
         data["text"] = {
             "format": {
@@ -603,9 +706,7 @@ def _build_dashscope_request(system_prompt: str, user_content: str, max_tokens: 
         }
     }
 
-    thinking_value = _get_thinking_value(question_context)
-    if thinking_value is not None:
-        data["parameters"]["enable_thinking"] = thinking_value
+    _apply_dashscope_thinking_settings(data["parameters"], question_context)
     if _streaming_enabled(question_context):
         headers["X-DashScope-SSE"] = "enable"
         data["parameters"]["incremental_output"] = True
@@ -620,30 +721,16 @@ def _build_anthropic_request(system_prompt: str, user_content: str, max_tokens: 
         "anthropic-version": "2023-06-01"
     }
 
-    request_max_tokens = max_tokens
     data = {
         "model": settings.AI_MODEL_NAME,
         "system": system_prompt,
         "messages": [
             {"role": "user", "content": user_content}
         ],
-        "max_tokens": request_max_tokens
+        "max_tokens": max_tokens
     }
 
-    thinking_value = _get_thinking_value(question_context)
-    if thinking_value is True:
-        thinking_budget = _get_thinking_budget(question_context)
-        request_max_tokens = max(max_tokens, thinking_budget + 1)
-        data["max_tokens"] = request_max_tokens
-        data["thinking"] = {
-            "type": "enabled",
-            "budget_tokens": min(thinking_budget, request_max_tokens - 1)
-        }
-        data["temperature"] = 1
-    elif thinking_value is False:
-        data["thinking"] = {
-            "type": "disabled"
-        }
+    _apply_anthropic_thinking_settings(data, max_tokens, question_context)
     if _structured_output_enabled(question_context):
         data["output_config"] = {
             "format": {
@@ -864,9 +951,13 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
         use_stream = _streaming_enabled(question_context)
 
         thinking_value = _get_thinking_value(question_context)
+        request_max_tokens = _extract_request_max_tokens(provider, data)
+        thinking_payload = _describe_thinking_payload(provider, data)
         logger.info(
             f"AI请求: provider={provider}, 模型={settings.AI_MODEL_NAME}, 类型={q_type}, "
-            f"thinking={thinking_value}, structured={_structured_output_enabled(question_context)}, stream={use_stream}"
+            f"thinking={thinking_value}, thinking_payload={thinking_payload}, "
+            f"max_output_tokens={request_max_tokens}, "
+            f"structured={_structured_output_enabled(question_context)}, stream={use_stream}"
         )
 
         session = await get_http_session()

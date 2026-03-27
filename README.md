@@ -42,9 +42,24 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 AI_MODEL_API_KEY=your-api-key-here
 AI_MODEL_PROVIDER=openai_chat_completions
 AI_MODEL_NAME=gpt-3.5-turbo
+# 只填写接口根地址；服务会按 provider 自动拼接具体路径：
+# - openai_chat_completions -> /chat/completions
+# - openai_responses -> /responses
+# - dashscope -> /api/v1/services/aigc/text-generation/generation
+# - anthropic -> /messages
 AI_MODEL_BASE_URL=https://api.openai.com/v1
 
-# thinking 参数：只要配置了该项（true 或 false），都会按对应值默认向上游显式转发；只有完全不配置时才不转发
+# 默认模型输出 token 上限
+AI_MAX_OUTPUT_TOKENS=1000
+
+# thinking 转发规则：
+# - 不配置 AI_ENABLE_THINKING_PARAMS：不向上游转发 thinking / thinking_budget
+# - 配置为 true/false：未传 thinking 时使用该 env 作为默认值；请求显式传参时优先用请求值
+# - 各 provider 的转发字段不同：
+#   - openai_chat_completions -> reasoning_effort=high；关闭仅在支持 none 的模型上转发，否则跳过关闭字段
+#   - openai_responses -> reasoning.effort=high|none（none 依赖模型支持）
+#   - dashscope -> parameters.enable_thinking=true|false
+#   - anthropic -> thinking={type: "enabled"|"disabled"}（thinking_budget 仅在 enabled 时使用）
 AI_ENABLE_THINKING_PARAMS=false
 # 以下开关默认关闭；只有显式设为 true 且请求显式传参时，才会转发到上游接口
 AI_ENABLE_STRUCTURED_OUTPUT_PARAMS=false
@@ -55,7 +70,7 @@ AI_ENABLE_STREAMING_PARAMS=false
 # AI_MODEL_NAME=gpt-5.4
 # AI_MODEL_BASE_URL=https://api.openai.com/v1
 
-# DashScope 原生接口示例
+# DashScope 原生接口示例（使用根地址，服务会自动补全 /api/v1/...）
 # AI_MODEL_PROVIDER=dashscope
 # AI_MODEL_NAME=qwen-plus
 # AI_MODEL_BASE_URL=https://dashscope.aliyuncs.com
@@ -89,23 +104,48 @@ RESPONSE_CODE_ERROR=0
 搜索接口支持以下可选参数：
 
 - `thinking=true` / `thinking=false`：显式请求开启或关闭深度思考
-- `thinking_budget=256`：可选思考预算，仅在思考被转发且上游接口支持启用思考时使用
+- `thinking_budget=256`：可选思考预算，仅在 Anthropic 且 `thinking=true` 时使用
 - `structured_output=true`：请求结构化输出
 - `stream=true`：请求流式输出
 
 这些参数默认都会被 API 接收，但转发规则分两类：
 
-- `AI_ENABLE_THINKING_PARAMS`：**只有环境变量完全不存在时**，才不会把 `thinking` 转发到上游；只要配置了这个值（无论是 `true` 还是 `false`），都会按请求值或该 env 默认值，向对应模型接口显式发送“开启/关闭思考”请求
+- `AI_ENABLE_THINKING_PARAMS`：只有环境变量存在时才会把 `thinking` 转发到上游；若请求未显式传 `thinking`，则使用 env 中的 `true/false` 作为默认值
 - `AI_ENABLE_STRUCTURED_OUTPUT_PARAMS=true`：开启后才会转发 `structured_output`
 - `AI_ENABLE_STREAMING_PARAMS=true`：开启后才会转发 `stream`
+
+provider 对应的 thinking 转发字段如下：
+
+- OpenAI Chat Completions：`reasoning_effort=high`；关闭仅在当前模型支持 `none` 时才会转发 `reasoning_effort=none`
+- OpenAI Responses：`reasoning.effort=high|none`（`none` 依赖模型支持）
+- DashScope：`parameters.enable_thinking=true|false`
+- Anthropic Claude：`thinking={type: "enabled", budget_tokens: ...}` 或 `thinking={type: "disabled"}`
 
 具体行为如下：
 
 - `AI_ENABLE_THINKING_PARAMS` 未配置：`thinking` / `thinking_budget` 不会传给上游
-- `AI_ENABLE_THINKING_PARAMS=true`：未传 `thinking` 时默认向上游发送“开启思考”；传 `thinking=false` 时会显式发送“关闭思考”
-- `AI_ENABLE_THINKING_PARAMS=false`：未传 `thinking` 时默认向上游发送“关闭思考”；传 `thinking=true` 时会显式发送“开启思考”
+- `AI_ENABLE_THINKING_PARAMS=true`：未传 `thinking` 时默认向上游发送“开启思考”
+- `AI_ENABLE_THINKING_PARAMS=false`：未传 `thinking` 时默认向上游发送“关闭思考”
+- 请求显式 `thinking=true/false`：覆盖 env 默认值
+- `thinking_budget` 只有 Anthropic 在 `thinking=true` 时会使用；其他 provider 当前忽略该字段
+- OpenAI 某些模型不支持“关闭思考”字段时，服务会跳过该关闭字段，而不是继续发送无效值
 - `AI_ENABLE_STRUCTURED_OUTPUT_PARAMS=false`：`structured_output` 不会传给上游
 - `AI_ENABLE_STREAMING_PARAMS=false`：`stream=true` 也会按普通非流式请求处理
+
+### 输出上限说明
+
+服务现在支持独立的输出上限配置：
+
+- `AI_MAX_OUTPUT_TOKENS`：默认值为 `1000`
+
+该配置会按 provider 映射到对应字段：
+
+- OpenAI Chat Completions：`max_tokens`
+- OpenAI Responses：`max_output_tokens`
+- DashScope：`parameters.max_tokens`
+- Anthropic Claude：`max_tokens`
+
+另外，搜索接口仍然限制问题文本长度不能超过 `1000` 个字符。
 
 ## API接口
 
