@@ -56,8 +56,8 @@ AI_MAX_OUTPUT_TOKENS=1000
 # - 不配置 AI_ENABLE_THINKING_PARAMS：不向上游转发 thinking / thinking_budget
 # - 配置为 true/false：未传 thinking 时使用该 env 作为默认值；请求显式传参时优先用请求值
 # - 各 provider 的转发字段不同：
-#   - openai_chat_completions -> reasoning_effort=high；关闭仅在支持 none 的模型上转发，否则跳过关闭字段
-#   - openai_responses -> reasoning.effort=high|none（none 依赖模型支持）
+#   - openai_chat_completions -> reasoning_effort=high|none
+#   - openai_responses -> reasoning.effort=high|none
 #   - dashscope -> parameters.enable_thinking=true|false
 #   - anthropic -> thinking={type: "enabled"|"disabled"}（thinking_budget 仅在 enabled 时使用）
 AI_ENABLE_THINKING_PARAMS=false
@@ -116,8 +116,8 @@ RESPONSE_CODE_ERROR=0
 
 provider 对应的 thinking 转发字段如下：
 
-- OpenAI Chat Completions：`reasoning_effort=high`；关闭仅在当前模型支持 `none` 时才会转发 `reasoning_effort=none`
-- OpenAI Responses：`reasoning.effort=high|none`（`none` 依赖模型支持）
+- OpenAI Chat Completions：`reasoning_effort=high|none`
+- OpenAI Responses：`reasoning.effort=high|none`
 - DashScope：`parameters.enable_thinking=true|false`
 - Anthropic Claude：`thinking={type: "enabled", budget_tokens: ...}` 或 `thinking={type: "disabled"}`
 
@@ -128,7 +128,6 @@ provider 对应的 thinking 转发字段如下：
 - `AI_ENABLE_THINKING_PARAMS=false`：未传 `thinking` 时默认向上游发送“关闭思考”
 - 请求显式 `thinking=true/false`：覆盖 env 默认值
 - `thinking_budget` 只有 Anthropic 在 `thinking=true` 时会使用；其他 provider 当前忽略该字段
-- OpenAI 某些模型不支持“关闭思考”字段时，服务会跳过该关闭字段，而不是继续发送无效值
 - `AI_ENABLE_STRUCTURED_OUTPUT_PARAMS=false`：`structured_output` 不会传给上游
 - `AI_ENABLE_STREAMING_PARAMS=false`：`stream=true` 也会按普通非流式请求处理
 

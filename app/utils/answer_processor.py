@@ -9,6 +9,7 @@ import json
 import os
 import threading
 from typing import Optional, Dict, Any, AsyncIterator
+from urllib.parse import urlsplit, urlunsplit
 from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
 from app.utils.logger import logger
@@ -251,13 +252,14 @@ def _get_max_output_tokens(default_value: int = 1000) -> int:
     return default_value
 
 
-def _openai_supports_reasoning_none(model_name: str) -> bool:
-    normalized_name = (model_name or "").strip().lower()
-    if not normalized_name.startswith("gpt-5"):
-        return False
-    if normalized_name.startswith("gpt-5."):
-        return True
-    return False
+def _dashscope_uses_streaming_transport(question_context: OCSQuestionContext) -> bool:
+    return _streaming_enabled(question_context) or _get_thinking_value(question_context) is True
+
+
+def _uses_streaming_transport(provider: str, question_context: OCSQuestionContext) -> bool:
+    if provider == "dashscope":
+        return _dashscope_uses_streaming_transport(question_context)
+    return _streaming_enabled(question_context)
 
 
 def _structured_output_enabled(question_context: OCSQuestionContext) -> bool:
@@ -280,6 +282,12 @@ def _dashscope_endpoint(base_url: str) -> str:
     base = (base_url or "").rstrip("/")
     full_suffix = "api/v1/services/aigc/text-generation/generation"
     path_suffix = "services/aigc/text-generation/generation"
+
+    parsed = urlsplit(base)
+    normalized_path = parsed.path.rstrip("/")
+    if normalized_path.endswith("/compatible-mode/v1"):
+        base = urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
+        return _join_url(base, full_suffix)
 
     if base.endswith(full_suffix):
         return base
@@ -307,28 +315,16 @@ def _apply_openai_chat_thinking_settings(data: Dict[str, Any], question_context:
     thinking_value = _get_thinking_value(question_context)
     if thinking_value is None:
         return "not_forwarded"
-    if thinking_value is True:
-        data["reasoning_effort"] = "high"
-        return "enabled"
-    if _openai_supports_reasoning_none(settings.AI_MODEL_NAME):
-        data["reasoning_effort"] = "none"
-        return "disabled"
-    logger.info(f"OpenAI Chat 当前模型不支持 reasoning_effort=none，跳过关闭思考字段: model={settings.AI_MODEL_NAME}")
-    return "disable_unsupported_skipped"
+    data["reasoning_effort"] = "high" if thinking_value else "none"
+    return "enabled" if thinking_value else "disabled"
 
 
 def _apply_openai_responses_thinking_settings(data: Dict[str, Any], question_context: OCSQuestionContext) -> str:
     thinking_value = _get_thinking_value(question_context)
     if thinking_value is None:
         return "not_forwarded"
-    if thinking_value is True:
-        data["reasoning"] = {"effort": "high"}
-        return "enabled"
-    if _openai_supports_reasoning_none(settings.AI_MODEL_NAME):
-        data["reasoning"] = {"effort": "none"}
-        return "disabled"
-    logger.info(f"OpenAI Responses 当前模型不支持 reasoning.effort=none，跳过关闭思考字段: model={settings.AI_MODEL_NAME}")
-    return "disable_unsupported_skipped"
+    data["reasoning"] = {"effort": "high" if thinking_value else "none"}
+    return "enabled" if thinking_value else "disabled"
 
 
 def _apply_dashscope_thinking_settings(parameters: Dict[str, Any], question_context: OCSQuestionContext) -> str:
@@ -707,7 +703,7 @@ def _build_dashscope_request(system_prompt: str, user_content: str, max_tokens: 
     }
 
     _apply_dashscope_thinking_settings(data["parameters"], question_context)
-    if _streaming_enabled(question_context):
+    if _dashscope_uses_streaming_transport(question_context):
         headers["X-DashScope-SSE"] = "enable"
         data["parameters"]["incremental_output"] = True
 
@@ -949,6 +945,7 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
         q_type, system_prompt, user_content, max_tokens = _build_ai_prompt(question_context)
         url, headers, data = _build_provider_request(provider, system_prompt, user_content, max_tokens, question_context)
         use_stream = _streaming_enabled(question_context)
+        use_streaming_transport = _uses_streaming_transport(provider, question_context)
 
         thinking_value = _get_thinking_value(question_context)
         request_max_tokens = _extract_request_max_tokens(provider, data)
@@ -957,7 +954,7 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
             f"AI请求: provider={provider}, 模型={settings.AI_MODEL_NAME}, 类型={q_type}, "
             f"thinking={thinking_value}, thinking_payload={thinking_payload}, "
             f"max_output_tokens={request_max_tokens}, "
-            f"structured={_structured_output_enabled(question_context)}, stream={use_stream}"
+            f"structured={_structured_output_enabled(question_context)}, stream={use_stream}, transport_stream={use_streaming_transport}"
         )
 
         session = await get_http_session()
@@ -972,7 +969,7 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
                 logger.error(f"AI API请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}")
                 return None
 
-            if use_stream:
+            if use_streaming_transport:
                 raw_text = await _read_streaming_response(response, provider)
             else:
                 result = await response.json(content_type=None)
