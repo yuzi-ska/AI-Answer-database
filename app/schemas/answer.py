@@ -1,8 +1,9 @@
 """
 OCS网课助手API数据模式
 """
+from typing import Optional
+
 from pydantic import BaseModel
-from typing import Optional, List
 
 
 class QuestionRequest(BaseModel):
@@ -15,7 +16,11 @@ class QuestionRequest(BaseModel):
     use_ai: bool = True  # 是否使用AI
     use_question_bank: bool = True  # 是否使用题库
     timeout: Optional[int] = 30  # 超时时间（秒）
-    
+    thinking: Optional[bool] = None  # 是否请求深度思考；未传时按 env 默认值或不转发
+    thinking_budget: Optional[int] = None  # 思考预算（仅在接口支持且配置允许时转发）
+    structured_output: bool = False  # 是否请求结构化输出
+    stream: bool = False  # 是否请求流式输出
+
     class Config:
         extra = "allow"  # 允许额外字段，兼容OCS的各种参数
 
@@ -38,6 +43,10 @@ class OCSQuestionContext(BaseModel):
     title: str  # 问题标题
     type: str  # 问题类型
     options: str  # 问题选项
+    thinking: Optional[bool] = None
+    thinking_budget: Optional[int] = None
+    structured_output: bool = False
+    stream: bool = False
 
 
 class AnswererConfig(BaseModel):

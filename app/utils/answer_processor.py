@@ -8,7 +8,7 @@ import aiohttp
 import json
 import os
 import threading
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, AsyncIterator
 from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
 from app.utils.logger import logger
@@ -199,6 +199,476 @@ async def query_manual_question_bank(question_context: OCSQuestionContext) -> Op
     return query_manual_question_bank_sync(question_context)
 
 
+_ANSWER_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"}
+    },
+    "required": ["answer"],
+    "additionalProperties": False
+}
+
+
+def _normalize_provider(provider: str) -> str:
+    provider_key = (provider or "").strip().lower()
+    provider_aliases = {
+        "openai": "openai_chat_completions",
+        "openai_chat": "openai_chat_completions",
+        "openai_chat_completions": "openai_chat_completions",
+        "openai_responses": "openai_responses",
+        "responses": "openai_responses",
+        "dashscope": "dashscope",
+        "anthropic": "anthropic",
+        "claude": "anthropic"
+    }
+    return provider_aliases.get(provider_key, provider_key or "openai_chat_completions")
+
+
+def _get_thinking_value(question_context: OCSQuestionContext) -> Optional[bool]:
+    env_value = settings.AI_ENABLE_THINKING_PARAMS
+    if env_value is None:
+        return None
+    if question_context.thinking is not None:
+        return question_context.thinking
+    return env_value
+
+
+def _thinking_enabled(question_context: OCSQuestionContext) -> bool:
+    return _get_thinking_value(question_context) is True
+
+
+def _get_thinking_budget(question_context: OCSQuestionContext, default_budget: int = 512) -> int:
+    budget = question_context.thinking_budget
+    if isinstance(budget, int) and budget > 0:
+        return budget
+    return default_budget
+
+
+def _structured_output_enabled(question_context: OCSQuestionContext) -> bool:
+    return bool(question_context.structured_output and settings.AI_ENABLE_STRUCTURED_OUTPUT_PARAMS)
+
+
+def _streaming_enabled(question_context: OCSQuestionContext) -> bool:
+    return bool(question_context.stream and settings.AI_ENABLE_STREAMING_PARAMS)
+
+
+def _join_url(base_url: str, path: str) -> str:
+    base = (base_url or "").rstrip("/")
+    suffix = path.lstrip("/")
+    if base.endswith(suffix):
+        return base
+    return f"{base}/{suffix}"
+
+
+def _dashscope_endpoint(base_url: str) -> str:
+    return _join_url(base_url, "services/aigc/text-generation/generation")
+
+
+def _anthropic_endpoint(base_url: str) -> str:
+    return _join_url(base_url, "messages")
+
+
+def _openai_chat_endpoint(base_url: str) -> str:
+    return _join_url(base_url, "chat/completions")
+
+
+def _openai_responses_endpoint(base_url: str) -> str:
+    return _join_url(base_url, "responses")
+
+
+def _extract_text_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return value["text"]
+        if isinstance(value.get("content"), str):
+            return value["content"]
+        return ""
+    if isinstance(value, list):
+        parts = [_extract_text_value(item) for item in value]
+        return "".join(part for part in parts if part)
+    return ""
+
+
+def _extract_openai_chat_text(result: Dict[str, Any]) -> str:
+    choices = result.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return _extract_text_value(message.get("content")).strip()
+
+
+def _extract_openai_responses_text(result: Dict[str, Any]) -> str:
+    output_text = result.get("output_text")
+    if output_text:
+        text = _extract_text_value(output_text).strip()
+        if text:
+            return text
+
+    texts = []
+    for item in result.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            text = _extract_text_value(content)
+            if text:
+                texts.append(text)
+    return "".join(texts).strip()
+
+
+def _extract_dashscope_text(result: Dict[str, Any]) -> str:
+    output = result.get("output") or {}
+    choices = output.get("choices") or []
+    if choices:
+        message = choices[0].get("message") or {}
+        text = _extract_text_value(message.get("content")).strip()
+        if text:
+            return text
+    return _extract_text_value(output.get("text")).strip()
+
+
+def _extract_anthropic_text(result: Dict[str, Any]) -> str:
+    texts = []
+    for block in result.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            texts.append(block["text"])
+    return "".join(texts).strip()
+
+
+def _extract_response_text(provider: str, result: Dict[str, Any]) -> str:
+    if provider == "openai_chat_completions":
+        return _extract_openai_chat_text(result)
+    if provider == "openai_responses":
+        return _extract_openai_responses_text(result)
+    if provider == "dashscope":
+        return _extract_dashscope_text(result)
+    if provider == "anthropic":
+        return _extract_anthropic_text(result)
+    return ""
+
+
+def _strip_code_fences(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        lines = cleaned.splitlines()
+        if len(lines) >= 3:
+            return "\n".join(lines[1:-1]).strip()
+    return cleaned
+
+
+def _extract_answer_text(raw_text: str, structured_output: bool) -> str:
+    cleaned_text = _strip_code_fences(raw_text)
+    if not structured_output:
+        return cleaned_text
+
+    try:
+        parsed = json.loads(cleaned_text)
+        if isinstance(parsed, dict) and parsed.get("answer") is not None:
+            return str(parsed["answer"]).strip()
+    except json.JSONDecodeError:
+        logger.warning("结构化输出解析失败，回退到原始文本")
+
+    return cleaned_text
+
+
+def _format_sse_event(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _build_stream_result_payload(
+    question_context: OCSQuestionContext,
+    answer: str,
+    source: str,
+    confidence: float,
+    question_type: Optional[str] = None,
+    success: Optional[bool] = None
+) -> Dict[str, Any]:
+    resolved_type = normalize_question_type(question_type or question_context.type) or (question_type or question_context.type or "")
+    normalized_answer = normalize_answer_for_type(answer, resolved_type, question_context.options or "") if answer else ""
+    is_success = bool(normalized_answer) if success is None else success
+    return {
+        "code": settings.RESPONSE_CODE_SUCCESS if is_success else settings.RESPONSE_CODE_ERROR,
+        "question": question_context.title,
+        "question_type": resolved_type,
+        "options": question_context.options or "",
+        "answer": normalized_answer,
+        "source": source,
+        "confidence": confidence
+    }
+
+
+def _extract_stream_chunk(provider: str, event_name: Optional[str], payload: Dict[str, Any]) -> str:
+    event_type = payload.get("type") or event_name
+
+    if provider == "openai_chat_completions":
+        choices = payload.get("choices") or []
+        if not choices:
+            return ""
+        delta = choices[0].get("delta") or {}
+        return _extract_text_value(delta.get("content"))
+
+    if provider == "openai_responses":
+        if event_type == "response.output_text.delta":
+            return _extract_text_value(payload.get("delta"))
+        return ""
+
+    if provider == "dashscope":
+        return _extract_dashscope_text(payload)
+
+    if provider == "anthropic":
+        if event_type != "content_block_delta":
+            return ""
+        delta = payload.get("delta") or {}
+        if delta.get("type") == "text_delta":
+            return delta.get("text", "")
+        return ""
+
+    return ""
+
+
+async def _iter_streaming_chunks(response: aiohttp.ClientResponse, provider: str) -> AsyncIterator[str]:
+    current_event = None
+
+    while True:
+        raw_line = await response.content.readline()
+        if not raw_line:
+            break
+
+        line = raw_line.decode("utf-8", errors="ignore").strip()
+        if not line:
+            current_event = None
+            continue
+
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+            continue
+
+        if not line.startswith("data:"):
+            continue
+
+        data_line = line[5:].strip()
+        if not data_line:
+            continue
+        if data_line == "[DONE]":
+            break
+
+        try:
+            payload = json.loads(data_line)
+        except json.JSONDecodeError:
+            continue
+
+        chunk = _extract_stream_chunk(provider, current_event, payload)
+        if chunk:
+            yield chunk
+
+        event_type = payload.get("type") or current_event
+        if provider == "openai_responses" and event_type == "response.completed":
+            break
+        if provider == "anthropic" and event_type == "message_stop":
+            break
+
+
+async def _read_streaming_response(response: aiohttp.ClientResponse, provider: str) -> str:
+    chunks = []
+    async for chunk in _iter_streaming_chunks(response, provider):
+        chunks.append(chunk)
+    return "".join(chunks).strip()
+
+
+def _build_structured_prompt(system_prompt: str) -> str:
+    return (
+        f"{system_prompt}\n"
+        "请仅返回一个JSON对象，格式为{\"answer\":\"最终答案\"}。"
+        "不要返回Markdown代码块，也不要添加额外解释。"
+    )
+
+
+def _build_ai_prompt(question_context: OCSQuestionContext) -> tuple[str, str, str, int]:
+    q_type = normalize_question_type(question_context.type) or (question_context.type.lower() if question_context.type else "")
+
+    if q_type == "completion":
+        system_prompt = "你是OCS网课助手AI答题系统。这是一道填空题，请直接回答填空处的内容，不要进行任何解释或讲解。不要返回选项字母，只返回填空的答案内容。"
+        user_content = f"【填空题】问题：{question_context.title}"
+        if question_context.options:
+            user_content += f"\n参考选项：{question_context.options}"
+        max_tokens = 100
+    elif q_type == "single":
+        system_prompt = "你是OCS网课助手AI答题系统。这是一道单选题，请仔细分析题目和选项，直接回答正确选项的字母（如A、B、C、D）。只返回选项字母，不要返回选项内容，不要有任何解释。"
+        user_content = f"【单选题】问题：{question_context.title}\n选项：{question_context.options}" if question_context.options else f"【单选题】问题：{question_context.title}"
+        max_tokens = 20
+    elif q_type == "multiple":
+        system_prompt = "你是OCS网课助手AI答题系统。这是一道多选题，请仔细分析题目和选项，直接回答所有正确选项的字母，用#号连接（如A#B#C）。只返回选项字母，不要返回选项内容，不要有任何解释。"
+        user_content = f"【多选题】问题：{question_context.title}\n选项：{question_context.options}" if question_context.options else f"【多选题】问题：{question_context.title}"
+        max_tokens = 50
+    elif q_type == "judgment":
+        system_prompt = "你是OCS网课助手AI答题系统。这是一道判断题，请直接回答'对'或'错'。只返回一个字，不要有任何解释。"
+        user_content = f"【判断题】问题：{question_context.title}"
+        max_tokens = 10
+    else:
+        system_prompt = "你是OCS网课助手AI答题系统。请根据题目类型回答问题。如果是填空题，只返回填空内容；如果是选择题，只返回选项字母；如果是判断题，只回答'对'或'错'。"
+        user_content = f"问题：{question_context.title}"
+        if question_context.options:
+            user_content += f"\n选项：{question_context.options}"
+        max_tokens = 100
+
+    if _structured_output_enabled(question_context):
+        system_prompt = _build_structured_prompt(system_prompt)
+
+    return q_type, system_prompt, user_content, max_tokens
+
+
+def _build_openai_chat_request(system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {settings.AI_MODEL_API_KEY}"
+    }
+    data = {
+        "model": settings.AI_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.1
+    }
+
+    thinking_value = _get_thinking_value(question_context)
+    if thinking_value is not None:
+        data["reasoning_effort"] = "high" if thinking_value else "none"
+    if _structured_output_enabled(question_context):
+        data["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer_response",
+                "schema": _ANSWER_JSON_SCHEMA,
+                "strict": True
+            }
+        }
+    if _streaming_enabled(question_context):
+        data["stream"] = True
+
+    return _openai_chat_endpoint(settings.AI_MODEL_BASE_URL), headers, data
+
+
+def _build_openai_responses_request(system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {settings.AI_MODEL_API_KEY}"
+    }
+    data = {
+        "model": settings.AI_MODEL_NAME,
+        "instructions": system_prompt,
+        "input": user_content,
+        "max_output_tokens": max_tokens,
+        "temperature": 0.1
+    }
+
+    thinking_value = _get_thinking_value(question_context)
+    if thinking_value is not None:
+        data["reasoning"] = {"effort": "high" if thinking_value else "none"}
+    if _structured_output_enabled(question_context):
+        data["text"] = {
+            "format": {
+                "type": "json_schema",
+                "name": "answer_response",
+                "schema": _ANSWER_JSON_SCHEMA,
+                "strict": True
+            }
+        }
+    if _streaming_enabled(question_context):
+        data["stream"] = True
+
+    return _openai_responses_endpoint(settings.AI_MODEL_BASE_URL), headers, data
+
+
+def _build_dashscope_request(system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {settings.AI_MODEL_API_KEY}"
+    }
+    data = {
+        "model": settings.AI_MODEL_NAME,
+        "input": {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ]
+        },
+        "parameters": {
+            "result_format": "message",
+            "max_tokens": max_tokens
+        }
+    }
+
+    thinking_value = _get_thinking_value(question_context)
+    if thinking_value is not None:
+        data["parameters"]["enable_thinking"] = thinking_value
+    if _streaming_enabled(question_context):
+        headers["X-DashScope-SSE"] = "enable"
+        data["parameters"]["incremental_output"] = True
+
+    return _dashscope_endpoint(settings.AI_MODEL_BASE_URL), headers, data
+
+
+def _build_anthropic_request(system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": settings.AI_MODEL_API_KEY,
+        "anthropic-version": "2023-06-01"
+    }
+
+    request_max_tokens = max_tokens
+    data = {
+        "model": settings.AI_MODEL_NAME,
+        "system": system_prompt,
+        "messages": [
+            {"role": "user", "content": user_content}
+        ],
+        "max_tokens": request_max_tokens
+    }
+
+    thinking_value = _get_thinking_value(question_context)
+    if thinking_value is True:
+        thinking_budget = _get_thinking_budget(question_context)
+        request_max_tokens = max(max_tokens, thinking_budget + 1)
+        data["max_tokens"] = request_max_tokens
+        data["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": min(thinking_budget, request_max_tokens - 1)
+        }
+        data["temperature"] = 1
+    elif thinking_value is False:
+        data["thinking"] = {
+            "type": "disabled"
+        }
+    if _structured_output_enabled(question_context):
+        data["output_config"] = {
+            "format": {
+                "type": "json_schema",
+                "schema": _ANSWER_JSON_SCHEMA
+            }
+        }
+    if _streaming_enabled(question_context):
+        data["stream"] = True
+
+    return _anthropic_endpoint(settings.AI_MODEL_BASE_URL), headers, data
+
+
+def _build_provider_request(provider: str, system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
+    if provider == "openai_chat_completions":
+        return _build_openai_chat_request(system_prompt, user_content, max_tokens, question_context)
+    if provider == "openai_responses":
+        return _build_openai_responses_request(system_prompt, user_content, max_tokens, question_context)
+    if provider == "dashscope":
+        return _build_dashscope_request(system_prompt, user_content, max_tokens, question_context)
+    if provider == "anthropic":
+        return _build_anthropic_request(system_prompt, user_content, max_tokens, question_context)
+    raise ValueError(f"不支持的AI接口类型: {provider}")
+
+
 async def process_question_with_multi_layer(
     question_context: OCSQuestionContext,
     use_ai: bool = True,
@@ -220,13 +690,18 @@ async def process_question_with_multi_layer(
     updated_context = OCSQuestionContext(
         title=clean_title,
         type=final_type,
-        options=clean_options
+        options=clean_options,
+        thinking=question_context.thinking,
+        thinking_budget=question_context.thinking_budget,
+        structured_output=question_context.structured_output,
+        stream=question_context.stream
     )
 
     query_functions = []
 
     # 优先查询手动题库
-    query_functions.append(("manual", query_manual_question_bank))
+    if use_question_bank:
+        query_functions.append(("manual", query_manual_question_bank))
 
     # 最后使用AI
     if use_ai:
@@ -260,83 +735,181 @@ async def process_question_with_multi_layer(
     return None
 
 
-async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, Any]]:
-    """使用AI查询答案"""
-    logger.info(f"使用AI查询答案: 类型={question_context.type}, 问题={question_context.title[:50]}...")
+async def query_ai_stream(question_context: OCSQuestionContext) -> AsyncIterator[str]:
+    """使用AI流式查询答案，并输出统一 SSE 事件"""
+    logger.info(f"使用AI流式查询答案: 类型={question_context.type}, 问题={question_context.title[:50]}...")
+
     try:
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.AI_MODEL_API_KEY}"
-        }
-
-        # 根据题目类型配置提示词
-        q_type = normalize_question_type(question_context.type) or (question_context.type.lower() if question_context.type else "")
-
-        if q_type == "completion":
-            # 填空题
-            system_prompt = "你是OCS网课助手AI答题系统。这是一道填空题，请直接回答填空处的内容，不要进行任何解释或讲解。不要返回选项字母，只返回填空的答案内容。"
-            user_content = f"【填空题】问题：{question_context.title}"
-            if question_context.options:
-                user_content += f"\n参考选项：{question_context.options}"
-            max_tokens = 100
-        elif q_type == "single":
-            # 单选题
-            system_prompt = "你是OCS网课助手AI答题系统。这是一道单选题，请仔细分析题目和选项，直接回答正确选项的字母（如A、B、C、D）。只返回选项字母，不要返回选项内容，不要有任何解释。"
-            user_content = f"【单选题】问题：{question_context.title}\n选项：{question_context.options}" if question_context.options else f"【单选题】问题：{question_context.title}"
-            max_tokens = 20
-        elif q_type == "multiple":
-            # 多选题
-            system_prompt = "你是OCS网课助手AI答题系统。这是一道多选题，请仔细分析题目和选项，直接回答所有正确选项的字母，用#号连接（如A#B#C）。只返回选项字母，不要返回选项内容，不要有任何解释。"
-            user_content = f"【多选题】问题：{question_context.title}\n选项：{question_context.options}" if question_context.options else f"【多选题】问题：{question_context.title}"
-            max_tokens = 50
-        elif q_type == "judgment":
-            # 判断题
-            system_prompt = "你是OCS网课助手AI答题系统。这是一道判断题，请直接回答'对'或'错'。只返回一个字，不要有任何解释。"
-            user_content = f"【判断题】问题：{question_context.title}"
-            max_tokens = 10
-        else:
-            # 默认处理
-            system_prompt = "你是OCS网课助手AI答题系统。请根据题目类型回答问题。如果是填空题，只返回填空内容；如果是选择题，只返回选项字母；如果是判断题，只回答'对'或'错'。"
-            user_content = f"问题：{question_context.title}"
-            if question_context.options:
-                user_content += f"\n选项：{question_context.options}"
-            max_tokens = 100
-
-        data = {
-            "model": settings.AI_MODEL_NAME,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            "max_tokens": max_tokens,
-            "temperature": 0.1
-        }
-
-        logger.info(f"AI请求: 模型={settings.AI_MODEL_NAME}, 类型={q_type}, max_tokens={max_tokens}")
+        provider = settings.ai_model_provider
+        q_type, system_prompt, user_content, max_tokens = _build_ai_prompt(question_context)
+        url, headers, data = _build_provider_request(provider, system_prompt, user_content, max_tokens, question_context)
 
         session = await get_http_session()
         async with session.post(
-            f"{settings.AI_MODEL_BASE_URL}/chat/completions",
+            url,
             headers=headers,
             json=data,
             timeout=aiohttp.ClientTimeout(total=30)
         ) as response:
-            if response.status == 200:
-                result = await response.json()
-                answer = result['choices'][0]['message']['content'].strip()
-                logger.info(f"AI返回的原始答案: 类型={q_type}, 答案={answer}")
-
-                return {
-                    "question": question_context.title,
-                    "answer": answer,
-                    "source": "ai",
-                    "confidence": 0.8,
-                    "metadata": {"model": settings.AI_MODEL_NAME, "question_type": q_type}
-                }
-            else:
+            if response.status != 200:
                 error_text = await response.text()
-                logger.error(f"AI API请求失败: 状态码={response.status}, 响应={error_text}")
+                logger.error(f"AI流式请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}")
+                yield _format_sse_event(
+                    "done",
+                    _build_stream_result_payload(question_context, "", "none", 0.0, q_type, False)
+                )
+                return
+
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            chunks = []
+
+            if "text/event-stream" in content_type:
+                async for chunk in _iter_streaming_chunks(response, provider):
+                    chunks.append(chunk)
+                    yield _format_sse_event("chunk", {"text": chunk})
+                raw_text = "".join(chunks).strip()
+            else:
+                result = await response.json(content_type=None)
+                raw_text = _extract_response_text(provider, result)
+
+            answer = _extract_answer_text(raw_text, _structured_output_enabled(question_context)).strip()
+            if not answer:
+                logger.warning(f"AI流式返回空答案: provider={provider}, 问题={question_context.title[:50]}...")
+                yield _format_sse_event(
+                    "done",
+                    _build_stream_result_payload(question_context, "", "none", 0.0, q_type, False)
+                )
+                return
+
+            yield _format_sse_event(
+                "done",
+                _build_stream_result_payload(question_context, answer, "ai", 0.8, q_type, True)
+            )
+    except Exception as e:
+        logger.error(f"AI流式查询出错: {e}")
+        yield _format_sse_event(
+            "done",
+            _build_stream_result_payload(question_context, "", "none", 0.0, question_context.type, False)
+        )
+
+
+async def process_question_with_multi_layer_stream(
+    question_context: OCSQuestionContext,
+    use_ai: bool = True,
+    use_question_bank: bool = True,
+    use_database: bool = False
+) -> AsyncIterator[str]:
+    """多层流式查询：手动题库 -> AI SSE"""
+    clean_title = clean_question_text(question_context.title)
+    clean_options = clean_question_text(question_context.options) if question_context.options else ""
+
+    normalized_input_type = normalize_question_type(question_context.type)
+    detected_type = detect_question_type(clean_title, clean_options)
+    final_type = normalized_input_type or detected_type
+    if detected_type == "judgment" and normalized_input_type in ["", "single"]:
+        final_type = "judgment"
+
+    updated_context = OCSQuestionContext(
+        title=clean_title,
+        type=final_type,
+        options=clean_options,
+        thinking=question_context.thinking,
+        thinking_budget=question_context.thinking_budget,
+        structured_output=question_context.structured_output,
+        stream=question_context.stream
+    )
+
+    if use_question_bank:
+        try:
+            logger.info(f"尝试从manual获取流式答案: 问题={updated_context.title[:50]}..., 类型={updated_context.type}")
+            result = await query_manual_question_bank(updated_context)
+            if result:
+                result_type = normalize_question_type(result.get('question_type') or updated_context.type) or updated_context.type
+                logger.info(f"成功从manual获取流式答案: 问题={updated_context.title[:50]}..., 题型={result_type}")
+                yield _format_sse_event(
+                    "done",
+                    _build_stream_result_payload(
+                        updated_context,
+                        result.get('answer', ''),
+                        "manual",
+                        float(result.get('confidence', 1.0)),
+                        result_type,
+                        True
+                    )
+                )
+                return
+        except asyncio.TimeoutError:
+            logger.warning(f"manual流式查询超时: {updated_context.title[:50]}...")
+        except Exception as e:
+            logger.error(f"manual流式查询出错: {str(e)} - 问题: {updated_context.title[:50]}...")
+
+    if use_ai:
+        async for event in query_ai_stream(updated_context):
+            yield event
+        return
+
+    yield _format_sse_event(
+        "done",
+        _build_stream_result_payload(updated_context, "", "none", 0.0, updated_context.type, False)
+    )
+
+
+async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, Any]]:
+    """使用AI查询答案"""
+    logger.info(f"使用AI查询答案: 类型={question_context.type}, 问题={question_context.title[:50]}...")
+    try:
+        provider = settings.ai_model_provider
+        q_type, system_prompt, user_content, max_tokens = _build_ai_prompt(question_context)
+        url, headers, data = _build_provider_request(provider, system_prompt, user_content, max_tokens, question_context)
+        use_stream = _streaming_enabled(question_context)
+
+        thinking_value = _get_thinking_value(question_context)
+        logger.info(
+            f"AI请求: provider={provider}, 模型={settings.AI_MODEL_NAME}, 类型={q_type}, "
+            f"thinking={thinking_value}, structured={_structured_output_enabled(question_context)}, stream={use_stream}"
+        )
+
+        session = await get_http_session()
+        async with session.post(
+            url,
+            headers=headers,
+            json=data,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"AI API请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}")
                 return None
+
+            if use_stream:
+                raw_text = await _read_streaming_response(response, provider)
+            else:
+                result = await response.json(content_type=None)
+                raw_text = _extract_response_text(provider, result)
+
+            answer = _extract_answer_text(raw_text, _structured_output_enabled(question_context)).strip()
+            logger.info(f"AI返回的原始答案: provider={provider}, 类型={q_type}, 答案={answer}")
+
+            if not answer:
+                logger.warning(f"AI返回空答案: provider={provider}, 问题={question_context.title[:50]}...")
+                return None
+
+            return {
+                "question": question_context.title,
+                "question_type": q_type,
+                "options": question_context.options or "",
+                "answer": answer,
+                "source": "ai",
+                "confidence": 0.8,
+                "metadata": {
+                    "provider": provider,
+                    "model": settings.AI_MODEL_NAME,
+                    "question_type": q_type,
+                    "thinking": thinking_value,
+                    "structured_output": _structured_output_enabled(question_context),
+                    "stream": use_stream
+                }
+            }
     except Exception as e:
         logger.error(f"AI查询出错: {e}")
         return None
