@@ -4,6 +4,7 @@ OCS网课助手日志配置
 import json
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -56,8 +57,10 @@ def setup_logger(name: str = "ocs_api", log_file: str = None, level: str = None)
 
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-        file_handler = logging.FileHandler(
+        file_handler = RotatingFileHandler(
             log_file,
+            maxBytes=500 * 1024,
+            backupCount=5,
             encoding='utf-8',
             delay=True
         )

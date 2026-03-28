@@ -903,6 +903,7 @@ async def query_ai_stream(question_context: OCSQuestionContext) -> AsyncIterator
     try:
         provider = settings.ai_model_provider
         q_type, system_prompt, user_content, max_tokens = _build_ai_prompt(question_context)
+        result = None
 
         if provider == "dashscope":
             request_data = _build_dashscope_request_data(
@@ -918,7 +919,25 @@ async def query_ai_stream(question_context: OCSQuestionContext) -> AsyncIterator
                 yield _format_sse_event("chunk", {"text": chunk})
 
             raw_text = "".join(chunks).strip()
+            debug_log_payload(
+                "AI流式返回详情",
+                {
+                    "provider": provider,
+                    "question_type": q_type,
+                    "transport_stream": True,
+                    "chunk_count": len(chunks),
+                    "raw_text": raw_text
+                }
+            )
             answer = _extract_answer_text(raw_text, _structured_output_enabled(question_context)).strip()
+            debug_log_payload(
+                "AI流式解析答案",
+                {
+                    "provider": provider,
+                    "question_type": q_type,
+                    "answer": answer
+                }
+            )
             if not answer:
                 logger.warning(f"AI流式返回空答案: provider={provider}, 问题={question_context.title[:50]}...")
                 yield _format_sse_event(
@@ -963,7 +982,28 @@ async def query_ai_stream(question_context: OCSQuestionContext) -> AsyncIterator
                 result = await response.json(content_type=None)
                 raw_text = _extract_response_text(provider, result)
 
+            if result is not None:
+                debug_log_payload("AI流式上游响应", {"provider": provider, "question_type": q_type, "response": result})
+            debug_log_payload(
+                "AI流式返回详情",
+                {
+                    "provider": provider,
+                    "question_type": q_type,
+                    "transport_stream": "text/event-stream" in content_type,
+                    "chunk_count": len(chunks),
+                    "raw_text": raw_text
+                }
+            )
+
             answer = _extract_answer_text(raw_text, _structured_output_enabled(question_context)).strip()
+            debug_log_payload(
+                "AI流式解析答案",
+                {
+                    "provider": provider,
+                    "question_type": q_type,
+                    "answer": answer
+                }
+            )
             if not answer:
                 logger.warning(f"AI流式返回空答案: provider={provider}, 问题={question_context.title[:50]}...")
                 yield _format_sse_event(
@@ -1053,6 +1093,7 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
         q_type, system_prompt, user_content, max_tokens = _build_ai_prompt(question_context)
         use_stream = _streaming_enabled(question_context)
         use_streaming_transport = _uses_streaming_transport(provider, question_context)
+        result = None
 
         if provider == "dashscope":
             request_data = _build_dashscope_request_data(
@@ -1107,7 +1148,27 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
                     result = await response.json(content_type=None)
                     raw_text = _extract_response_text(provider, result)
 
+        if result is not None:
+            debug_log_payload("AI上游响应", {"provider": provider, "question_type": q_type, "response": result})
+        debug_log_payload(
+            "AI返回详情",
+            {
+                "provider": provider,
+                "question_type": q_type,
+                "transport_stream": use_streaming_transport,
+                "raw_text": raw_text
+            }
+        )
+
         answer = _extract_answer_text(raw_text, _structured_output_enabled(question_context)).strip()
+        debug_log_payload(
+            "AI解析答案",
+            {
+                "provider": provider,
+                "question_type": q_type,
+                "answer": answer
+            }
+        )
         logger.info(f"AI返回的原始答案: provider={provider}, 类型={q_type}, 答案={answer}")
 
         if not answer:
