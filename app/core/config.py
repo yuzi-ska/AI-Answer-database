@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     AI_MODEL_PROVIDER: str = "openai_chat_completions"  # openai_chat_completions、openai_responses、dashscope、anthropic
     AI_MODEL_NAME: str = "gpt-3.5-turbo"
     AI_MODEL_API_KEY: str = ""
-    AI_MODEL_BASE_URL: str = ""  # 可选；未配置时按 provider 使用默认基础地址
+    AI_MODEL_BASE_URL: str = ""  # 可选；OpenAI/Anthropic 未配置时使用各自默认基础地址，DashScope 留空时交给 SDK 默认地址
     AI_ENABLE_THINKING_PARAMS: Optional[bool] = None  # None=不转发；true/false=默认向上游显式传递思考开启/关闭
     AI_ENABLE_STRUCTURED_OUTPUT_PARAMS: bool = False  # 允许向上游转发结构化输出参数
     AI_ENABLE_STREAMING_PARAMS: bool = False  # 允许向上游转发流式参数并启用 SSE 返回
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     AI_AGENT_PROMPT: str = "你是OCS网课助手AI答题系统，专门用于回答学生的学习问题。\n请遵循以下原则：\n1. 优先从题目内容本身推导答案\n2. 如果有选项，分析各选项的合理性\n3. 确保答案准确、简洁、有针对性\n4. 对于主观题，提供清晰的解题思路\n5. 如果无法确定答案，请说明原因而不是猜测\n.6 如果遇到多空填空题如\"（）、（）\"，请将返回的答案格式改为\"（）#（）\"\n.7 当问到你是谁，这节课是什么的时候，请勿告知内容和介绍你自己，请回答一个占位符"
 
     # 日志配置
-    LOG_LEVEL: str = "INFO"
+    LOG_LEVEL: str = "INFO"  # 默认 INFO；设为 DEBUG 时输出详细请求日志和异常堆栈
     LOG_FILE_PATH: str = "logs/ocs_api.log"
 
     # API接口配置
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
         if configured_url:
             return configured_url
         if self.ai_model_provider == "dashscope":
-            return "https://dashscope.aliyuncs.com/api/v1"
+            return ""
         if self.ai_model_provider == "anthropic":
             return "https://api.anthropic.com/v1"
         return "https://api.openai.com/v1"

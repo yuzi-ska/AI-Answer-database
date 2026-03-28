@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from app.core.config import settings
 from app.schemas.answer import OCSQuestionContext
 from app.utils.answer_processor import process_question_with_multi_layer, process_question_with_multi_layer_stream
-from app.utils.logger import logger
+from app.utils.logger import log_exception, logger
 from app.utils.question_detector import clean_question_text, normalize_answer_for_type, normalize_question_type
 
 router = APIRouter()
@@ -153,5 +153,5 @@ async def search_question(
             "code": settings.RESPONSE_CODE_ERROR,
             "results": []
         }
-        logger.error(f"OCS搜索出错: {str(e)}, 问题: {q[:50] if q else 'empty'}...")
+        log_exception(f"OCS搜索出错，问题: {q[:50] if q else 'empty'}...", e)
         return response_data

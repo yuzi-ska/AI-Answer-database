@@ -37,7 +37,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 创建 `.env` 文件：
 
 ```env
-# AI模型/接口
+# AI模型/接口类型（AI_MODEL_PROVIDER 用于切换上游接口）
 # 可选值: openai_chat_completions, openai_responses, dashscope, anthropic
 AI_MODEL_API_KEY=your-api-key-here
 AI_MODEL_PROVIDER=openai_chat_completions
@@ -45,7 +45,7 @@ AI_MODEL_NAME=gpt-3.5-turbo
 # 可选：只填写接口基础地址。
 # - openai_chat_completions / openai_responses 默认 https://api.openai.com/v1
 # - anthropic 默认使用官方 /v1 根地址
-# - dashscope 使用 Python SDK；当 AI_MODEL_PROVIDER=dashscope 且未配置时，默认 https://dashscope.aliyuncs.com/api/v1
+# - dashscope 使用 Python SDK；当 AI_MODEL_PROVIDER=dashscope 且未配置时，使用 SDK 默认地址
 AI_MODEL_BASE_URL=https://api.openai.com/v1
 
 # 默认模型输出 token 上限
@@ -72,7 +72,7 @@ AI_ENABLE_STREAMING_PARAMS=false
 # DashScope SDK 示例
 # AI_MODEL_PROVIDER=dashscope
 # AI_MODEL_NAME=qwen-plus
-# AI_MODEL_BASE_URL=   # 可留空；留空时默认 https://dashscope.aliyuncs.com/api/v1
+# AI_MODEL_BASE_URL=   # 可留空；留空时使用 SDK 默认地址
 
 # Anthropic Claude 接口示例
 # AI_MODEL_PROVIDER=anthropic
@@ -83,6 +83,8 @@ AI_ENABLE_STREAMING_PARAMS=false
 AI_AGENT_PROMPT=你的AI提示词
 
 # 日志
+# - 默认 INFO：输出常规运行日志
+# - 设为 DEBUG：额外输出上游请求 payload（已脱敏）和完整异常堆栈
 LOG_LEVEL=INFO
 LOG_FILE_PATH=logs/ocs_api.log
 
@@ -133,7 +135,7 @@ provider 对应的 thinking 转发字段如下：
 ### DashScope 说明
 
 - DashScope provider 现在通过 `dashscope` Python SDK 调用，不再手写 HTTP 请求。
-- 当 `AI_MODEL_PROVIDER=dashscope` 且未配置 `AI_MODEL_BASE_URL` 时，服务默认使用 `https://dashscope.aliyuncs.com/api/v1`。
+- 当 `AI_MODEL_PROVIDER=dashscope` 且未配置 `AI_MODEL_BASE_URL` 时，会直接使用 DashScope SDK 默认地址。
 - 若显式配置 `AI_MODEL_BASE_URL`，则会继续透传给 DashScope SDK。
 - DashScope 在启用思考或显式请求流式输出时，会走 SDK 的流式 transport，但对外仍保持统一 SSE/JSON 响应格式。
 

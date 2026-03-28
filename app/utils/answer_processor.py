@@ -12,7 +12,7 @@ import threading
 from typing import Optional, Dict, Any, AsyncIterator
 from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
-from app.utils.logger import logger
+from app.utils.logger import debug_log_payload, log_exception, logger
 from app.utils.question_detector import detect_question_type, clean_question_text, normalize_answer_for_type, normalize_question_type
 from app.utils.http_client import get_http_session
 
@@ -72,7 +72,7 @@ def _reload_cache():
             else:
                 _question_bank_cache = {}
         except Exception as e:
-            logger.error(f"重新加载手动题库缓存失败: {e}")
+            log_exception("重新加载手动题库缓存失败", e)
 
 
 def _start_file_watcher():
@@ -94,7 +94,7 @@ def _start_file_watcher():
         _file_observer.start()
         logger.info(f"已启动手动题库文件监控: {watch_path}")
     except Exception as e:
-        logger.error(f"启动文件监控失败: {e}")
+        log_exception("启动文件监控失败", e)
 
 
 def load_manual_question_bank() -> Dict[str, Dict[str, str]]:
@@ -127,7 +127,7 @@ def load_manual_question_bank() -> Dict[str, Dict[str, str]]:
 
                     return result
         except Exception as e:
-            logger.error(f"加载手动题库失败: {e}")
+            log_exception("加载手动题库失败", e)
         return {}
 
 
@@ -202,7 +202,7 @@ def query_manual_question_bank_sync(question_context: OCSQuestionContext) -> Opt
                     }
 
     except Exception as e:
-        logger.error(f"查询手动题库出错: {e}")
+        log_exception("查询手动题库出错", e)
     return None
 
 
@@ -378,7 +378,9 @@ def _ensure_dashscope_sdk_available() -> None:
 
 def _configure_dashscope_sdk() -> None:
     _ensure_dashscope_sdk_available()
-    dashscope.base_http_api_url = settings.ai_model_base_url
+    configured_url = (settings.AI_MODEL_BASE_URL or "").strip()
+    if configured_url:
+        dashscope.base_http_api_url = configured_url
 
 
 def _normalize_dashscope_value(value: Any) -> Any:
@@ -435,6 +437,7 @@ def _build_dashscope_request_data(
     if _structured_output_enabled(question_context) and thinking_status != "enabled":
         data["response_format"] = {"type": "json_object"}
 
+    debug_log_payload("DashScope 请求参数", data)
     return data
 
 
@@ -752,6 +755,7 @@ def _build_openai_chat_request(system_prompt: str, user_content: str, max_tokens
     if _streaming_enabled(question_context):
         data["stream"] = True
 
+    debug_log_payload("OpenAI Chat 请求", {"url": _openai_chat_endpoint(settings.ai_model_base_url), "headers": headers, "json": data})
     return _openai_chat_endpoint(settings.ai_model_base_url), headers, data
 
 
@@ -781,6 +785,7 @@ def _build_openai_responses_request(system_prompt: str, user_content: str, max_t
     if _streaming_enabled(question_context):
         data["stream"] = True
 
+    debug_log_payload("OpenAI Responses 请求", {"url": _openai_responses_endpoint(settings.ai_model_base_url), "headers": headers, "json": data})
     return _openai_responses_endpoint(settings.ai_model_base_url), headers, data
 
 
@@ -811,6 +816,7 @@ def _build_anthropic_request(system_prompt: str, user_content: str, max_tokens: 
     if _streaming_enabled(question_context):
         data["stream"] = True
 
+    debug_log_payload("Anthropic 请求", {"url": _anthropic_endpoint(settings.ai_model_base_url), "headers": headers, "json": data})
     return _anthropic_endpoint(settings.ai_model_base_url), headers, data
 
 
@@ -883,7 +889,7 @@ async def process_question_with_multi_layer(
             logger.warning(f"{source_name}查询超时: {updated_context.title[:50]}...")
             continue
         except Exception as e:
-            logger.error(f"{source_name}查询出错: {str(e)} - 问题: {updated_context.title[:50]}...")
+            log_exception(f"{source_name}查询出错，问题: {updated_context.title[:50]}...", e)
             continue
 
     logger.warning(f"所有查询方式都失败: {updated_context.title[:50]}...")
@@ -938,7 +944,7 @@ async def query_ai_stream(question_context: OCSQuestionContext) -> AsyncIterator
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
-                logger.error(f"AI流式请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}")
+                log_exception(f"AI流式请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}", RuntimeError(error_text))
                 yield _format_sse_event(
                     "done",
                     _build_stream_result_payload(question_context, "", "none", 0.0, q_type, False)
@@ -971,7 +977,7 @@ async def query_ai_stream(question_context: OCSQuestionContext) -> AsyncIterator
                 _build_stream_result_payload(question_context, answer, "ai", 0.8, q_type, True)
             )
     except Exception as e:
-        logger.error(f"AI流式查询出错: {e}")
+        log_exception("AI流式查询出错", e)
         yield _format_sse_event(
             "done",
             _build_stream_result_payload(question_context, "", "none", 0.0, question_context.type, False)
@@ -1026,7 +1032,7 @@ async def process_question_with_multi_layer_stream(
         except asyncio.TimeoutError:
             logger.warning(f"manual流式查询超时: {updated_context.title[:50]}...")
         except Exception as e:
-            logger.error(f"manual流式查询出错: {str(e)} - 问题: {updated_context.title[:50]}...")
+            log_exception(f"manual流式查询出错，问题: {updated_context.title[:50]}...", e)
 
     if use_ai:
         async for event in query_ai_stream(updated_context):
@@ -1092,7 +1098,7 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    logger.error(f"AI API请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}")
+                    log_exception(f"AI API请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}", RuntimeError(error_text))
                     return None
 
                 if use_streaming_transport:
@@ -1125,5 +1131,5 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
             }
         }
     except Exception as e:
-        logger.error(f"AI查询出错: {e}")
+        log_exception("AI查询出错", e)
         return None
