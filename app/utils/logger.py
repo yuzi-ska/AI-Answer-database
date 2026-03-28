@@ -6,6 +6,7 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from pprint import pformat
 from typing import Any
 
 from app.core.config import settings
@@ -97,6 +98,14 @@ def debug_log_payload(title: str, payload: Any) -> None:
         formatted_payload = repr(sanitized_payload)
 
     logger.debug(f"{title}:\n{formatted_payload}")
+
+
+def debug_log_kwargs(title: str, payload: Any) -> None:
+    if not is_debug_enabled():
+        return
+
+    sanitized_payload = _sanitize_log_value(payload)
+    logger.debug(f"{title}:\n{pformat(sanitized_payload, width=100, sort_dicts=False)}")
 
 
 def log_exception(message: str, exc: Exception) -> None:

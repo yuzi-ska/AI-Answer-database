@@ -12,7 +12,7 @@ import threading
 from typing import Optional, Dict, Any, AsyncIterator
 from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
-from app.utils.logger import debug_log_payload, log_exception, logger
+from app.utils.logger import debug_log_kwargs, debug_log_payload, log_exception, logger
 from app.utils.question_detector import detect_question_type, clean_question_text, normalize_answer_for_type, normalize_question_type
 from app.utils.http_client import get_http_session
 
@@ -437,7 +437,7 @@ def _build_dashscope_request_data(
     if _structured_output_enabled(question_context) and thinking_status != "enabled":
         data["response_format"] = {"type": "json_object"}
 
-    debug_log_payload("DashScope 请求参数", data)
+    debug_log_kwargs("DashScope SDK kwargs", data)
     return data
 
 
