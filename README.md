@@ -10,7 +10,7 @@
 ## 功能特点
 
 - AI+手动题库混合答题
-- 支持 4 种 AI 接口：OpenAI Chat Completions、OpenAI Responses、DashScope 原生接口、Anthropic Claude
+- 支持 4 种 AI 接口：OpenAI Chat Completions、OpenAI Responses、DashScope SDK、Anthropic Claude
 - 兼容OCS AnswererWrapper接口
 - 支持GET请求方式
 - 异步高并发处理
@@ -42,11 +42,10 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 AI_MODEL_API_KEY=your-api-key-here
 AI_MODEL_PROVIDER=openai_chat_completions
 AI_MODEL_NAME=gpt-3.5-turbo
-# 只填写接口根地址；服务会按 provider 自动拼接具体路径：
-# - openai_chat_completions -> /chat/completions
-# - openai_responses -> /responses
-# - dashscope -> /api/v1/services/aigc/text-generation/generation
-# - anthropic -> /messages
+# 可选：只填写接口基础地址。
+# - openai_chat_completions / openai_responses 默认 https://api.openai.com/v1
+# - anthropic 默认使用官方 /v1 根地址
+# - dashscope 使用 Python SDK；当 AI_MODEL_PROVIDER=dashscope 且未配置时，默认 https://dashscope.aliyuncs.com/api/v1
 AI_MODEL_BASE_URL=https://api.openai.com/v1
 
 # 默认模型输出 token 上限
@@ -58,7 +57,7 @@ AI_MAX_OUTPUT_TOKENS=1000
 # - 各 provider 的转发字段不同：
 #   - openai_chat_completions -> reasoning_effort=high|none
 #   - openai_responses -> reasoning.effort=high|none
-#   - dashscope -> parameters.enable_thinking=true|false
+#   - dashscope -> enable_thinking=true|false（SDK 参数）
 #   - anthropic -> thinking={type: "enabled"|"disabled"}（thinking_budget 仅在 enabled 时使用）
 AI_ENABLE_THINKING_PARAMS=false
 # 以下开关默认关闭；只有显式设为 true 且请求显式传参时，才会转发到上游接口
@@ -70,10 +69,10 @@ AI_ENABLE_STREAMING_PARAMS=false
 # AI_MODEL_NAME=gpt-5.4
 # AI_MODEL_BASE_URL=https://api.openai.com/v1
 
-# DashScope 原生接口示例（使用根地址，服务会自动补全 /api/v1/...）
+# DashScope SDK 示例
 # AI_MODEL_PROVIDER=dashscope
 # AI_MODEL_NAME=qwen-plus
-# AI_MODEL_BASE_URL=https://dashscope.aliyuncs.com
+# AI_MODEL_BASE_URL=   # 可留空；留空时默认 https://dashscope.aliyuncs.com/api/v1
 
 # Anthropic Claude 接口示例
 # AI_MODEL_PROVIDER=anthropic
@@ -118,7 +117,7 @@ provider 对应的 thinking 转发字段如下：
 
 - OpenAI Chat Completions：`reasoning_effort=high|none`
 - OpenAI Responses：`reasoning.effort=high|none`
-- DashScope：`parameters.enable_thinking=true|false`
+- DashScope SDK：`enable_thinking=true|false`
 - Anthropic Claude：`thinking={type: "enabled", budget_tokens: ...}` 或 `thinking={type: "disabled"}`
 
 具体行为如下：
@@ -131,6 +130,13 @@ provider 对应的 thinking 转发字段如下：
 - `AI_ENABLE_STRUCTURED_OUTPUT_PARAMS=false`：`structured_output` 不会传给上游
 - `AI_ENABLE_STREAMING_PARAMS=false`：`stream=true` 也会按普通非流式请求处理
 
+### DashScope 说明
+
+- DashScope provider 现在通过 `dashscope` Python SDK 调用，不再手写 HTTP 请求。
+- 当 `AI_MODEL_PROVIDER=dashscope` 且未配置 `AI_MODEL_BASE_URL` 时，服务默认使用 `https://dashscope.aliyuncs.com/api/v1`。
+- 若显式配置 `AI_MODEL_BASE_URL`，则会继续透传给 DashScope SDK。
+- DashScope 在启用思考或显式请求流式输出时，会走 SDK 的流式 transport，但对外仍保持统一 SSE/JSON 响应格式。
+
 ### 输出上限说明
 
 服务现在支持独立的输出上限配置：
@@ -141,7 +147,7 @@ provider 对应的 thinking 转发字段如下：
 
 - OpenAI Chat Completions：`max_tokens`
 - OpenAI Responses：`max_output_tokens`
-- DashScope：`parameters.max_tokens`
+- DashScope SDK：`max_tokens`
 - Anthropic Claude：`max_tokens`
 
 另外，搜索接口仍然限制问题文本长度不能超过 `1000` 个字符。

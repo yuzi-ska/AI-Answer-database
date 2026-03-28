@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     AI_MODEL_PROVIDER: str = "openai_chat_completions"  # openai_chat_completions、openai_responses、dashscope、anthropic
     AI_MODEL_NAME: str = "gpt-3.5-turbo"
     AI_MODEL_API_KEY: str = ""
-    AI_MODEL_BASE_URL: str = "https://api.openai.com/v1"  # 不同接口类型使用各自基础地址
+    AI_MODEL_BASE_URL: str = ""  # 可选；未配置时按 provider 使用默认基础地址
     AI_ENABLE_THINKING_PARAMS: Optional[bool] = None  # None=不转发；true/false=默认向上游显式传递思考开启/关闭
     AI_ENABLE_STRUCTURED_OUTPUT_PARAMS: bool = False  # 允许向上游转发结构化输出参数
     AI_ENABLE_STREAMING_PARAMS: bool = False  # 允许向上游转发流式参数并启用 SSE 返回
@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     def ai_model_provider(self) -> str:
         provider = (self.AI_MODEL_PROVIDER or "").strip().lower()
         return AI_PROVIDER_ALIASES.get(provider, provider)
+
+    @property
+    def ai_model_base_url(self) -> str:
+        configured_url = (self.AI_MODEL_BASE_URL or "").strip()
+        if configured_url:
+            return configured_url
+        if self.ai_model_provider == "dashscope":
+            return "https://dashscope.aliyuncs.com/api/v1"
+        if self.ai_model_provider == "anthropic":
+            return "https://api.anthropic.com/v1"
+        return "https://api.openai.com/v1"
 
     # 使用属性获取解析后的ALLOWED_ORIGINS列表
     @property

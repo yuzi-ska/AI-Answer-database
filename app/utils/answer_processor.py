@@ -7,14 +7,25 @@ import asyncio
 import aiohttp
 import json
 import os
+import queue
 import threading
 from typing import Optional, Dict, Any, AsyncIterator
-from urllib.parse import urlsplit, urlunsplit
 from app.schemas.answer import OCSQuestionContext
 from app.core.config import settings
 from app.utils.logger import logger
 from app.utils.question_detector import detect_question_type, clean_question_text, normalize_answer_for_type, normalize_question_type
 from app.utils.http_client import get_http_session
+
+try:
+    import dashscope
+    from dashscope import Generation
+    from dashscope.aigc.generation import AioGeneration
+    DASHSCOPE_SDK_AVAILABLE = True
+except ImportError:
+    dashscope = None
+    Generation = None
+    AioGeneration = None
+    DASHSCOPE_SDK_AVAILABLE = False
 
 try:
     from watchdog.observers import Observer
@@ -278,27 +289,6 @@ def _join_url(base_url: str, path: str) -> str:
     return f"{base}/{suffix}"
 
 
-def _dashscope_endpoint(base_url: str) -> str:
-    base = (base_url or "").rstrip("/")
-    full_suffix = "api/v1/services/aigc/text-generation/generation"
-    path_suffix = "services/aigc/text-generation/generation"
-
-    parsed = urlsplit(base)
-    normalized_path = parsed.path.rstrip("/")
-    if normalized_path.endswith("/compatible-mode/v1"):
-        base = urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
-        return _join_url(base, full_suffix)
-
-    if base.endswith(full_suffix):
-        return base
-    if base.endswith(path_suffix):
-        base_root = base[:-len(path_suffix)].rstrip("/")
-        return _join_url(base_root, full_suffix)
-    if base.endswith("api/v1"):
-        return _join_url(base, path_suffix)
-    return _join_url(base, full_suffix)
-
-
 def _anthropic_endpoint(base_url: str) -> str:
     return _join_url(base_url, "messages")
 
@@ -362,8 +352,7 @@ def _describe_thinking_payload(provider: str, data: Dict[str, Any]) -> str:
         reasoning = data.get("reasoning") or {}
         return str(reasoning.get("effort", "not_forwarded"))
     if provider == "dashscope":
-        parameters = data.get("parameters") or {}
-        return str(parameters.get("enable_thinking", "not_forwarded"))
+        return str(data.get("enable_thinking", "not_forwarded"))
     if provider == "anthropic":
         thinking = data.get("thinking") or {}
         return str(thinking.get("type", "not_forwarded"))
@@ -376,11 +365,123 @@ def _extract_request_max_tokens(provider: str, data: Dict[str, Any]) -> Optional
     if provider == "openai_responses":
         return data.get("max_output_tokens")
     if provider == "dashscope":
-        parameters = data.get("parameters") or {}
-        return parameters.get("max_tokens")
+        return data.get("max_tokens")
     if provider == "anthropic":
         return data.get("max_tokens")
     return None
+
+
+def _ensure_dashscope_sdk_available() -> None:
+    if not DASHSCOPE_SDK_AVAILABLE:
+        raise RuntimeError("DashScope Python SDK 未安装，请先安装 dashscope")
+
+
+def _configure_dashscope_sdk() -> None:
+    _ensure_dashscope_sdk_available()
+    dashscope.base_http_api_url = settings.ai_model_base_url
+
+
+def _normalize_dashscope_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {key: _normalize_dashscope_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_dashscope_value(item) for item in value]
+    if hasattr(value, "to_dict"):
+        try:
+            return _normalize_dashscope_value(value.to_dict())
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        data = {
+            key: item
+            for key, item in vars(value).items()
+            if not key.startswith("_")
+        }
+        if data:
+            return _normalize_dashscope_value(data)
+    return value
+
+
+def _normalize_dashscope_response(response: Any) -> Dict[str, Any]:
+    normalized = _normalize_dashscope_value(response)
+    return normalized if isinstance(normalized, dict) else {}
+
+
+def _build_dashscope_request_data(
+    system_prompt: str,
+    user_content: str,
+    max_tokens: int,
+    question_context: OCSQuestionContext,
+    use_streaming_transport: bool
+) -> Dict[str, Any]:
+    data = {
+        "api_key": settings.AI_MODEL_API_KEY,
+        "model": settings.AI_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ],
+        "result_format": "message",
+        "max_tokens": max_tokens,
+    }
+
+    thinking_status = _apply_dashscope_thinking_settings(data, question_context)
+    if use_streaming_transport:
+        data["stream"] = True
+        data["incremental_output"] = True
+
+    if _structured_output_enabled(question_context) and thinking_status != "enabled":
+        data["response_format"] = {"type": "json_object"}
+
+    return data
+
+
+async def _call_dashscope_non_stream(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    _configure_dashscope_sdk()
+    response = await AioGeneration.call(**request_data)
+    return _normalize_dashscope_response(response)
+
+
+async def _read_dashscope_streaming_response(request_data: Dict[str, Any]) -> str:
+    def _consume_stream() -> str:
+        _configure_dashscope_sdk()
+        chunks = []
+        for response in Generation.call(**request_data):
+            chunk = _extract_dashscope_text(_normalize_dashscope_response(response))
+            if chunk:
+                chunks.append(chunk)
+        return "".join(chunks).strip()
+
+    return await asyncio.to_thread(_consume_stream)
+
+
+async def _iter_dashscope_sdk_chunks(request_data: Dict[str, Any]) -> AsyncIterator[str]:
+    response_queue: queue.Queue = queue.Queue()
+
+    def _worker() -> None:
+        try:
+            _configure_dashscope_sdk()
+            for response in Generation.call(**request_data):
+                chunk = _extract_dashscope_text(_normalize_dashscope_response(response))
+                if chunk:
+                    response_queue.put(("chunk", chunk))
+        except Exception as exc:
+            response_queue.put(("error", str(exc)))
+        finally:
+            response_queue.put(("done", None))
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    while True:
+        event_type, value = await asyncio.to_thread(response_queue.get)
+        if event_type == "chunk":
+            yield value
+            continue
+        if event_type == "error":
+            raise RuntimeError(value)
+        break
 
 
 def _extract_text_value(value: Any) -> str:
@@ -651,7 +752,7 @@ def _build_openai_chat_request(system_prompt: str, user_content: str, max_tokens
     if _streaming_enabled(question_context):
         data["stream"] = True
 
-    return _openai_chat_endpoint(settings.AI_MODEL_BASE_URL), headers, data
+    return _openai_chat_endpoint(settings.ai_model_base_url), headers, data
 
 
 def _build_openai_responses_request(system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
@@ -680,34 +781,7 @@ def _build_openai_responses_request(system_prompt: str, user_content: str, max_t
     if _streaming_enabled(question_context):
         data["stream"] = True
 
-    return _openai_responses_endpoint(settings.AI_MODEL_BASE_URL), headers, data
-
-
-def _build_dashscope_request(system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {settings.AI_MODEL_API_KEY}"
-    }
-    data = {
-        "model": settings.AI_MODEL_NAME,
-        "input": {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ]
-        },
-        "parameters": {
-            "result_format": "message",
-            "max_tokens": max_tokens
-        }
-    }
-
-    _apply_dashscope_thinking_settings(data["parameters"], question_context)
-    if _dashscope_uses_streaming_transport(question_context):
-        headers["X-DashScope-SSE"] = "enable"
-        data["parameters"]["incremental_output"] = True
-
-    return _dashscope_endpoint(settings.AI_MODEL_BASE_URL), headers, data
+    return _openai_responses_endpoint(settings.ai_model_base_url), headers, data
 
 
 def _build_anthropic_request(system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
@@ -737,7 +811,7 @@ def _build_anthropic_request(system_prompt: str, user_content: str, max_tokens: 
     if _streaming_enabled(question_context):
         data["stream"] = True
 
-    return _anthropic_endpoint(settings.AI_MODEL_BASE_URL), headers, data
+    return _anthropic_endpoint(settings.ai_model_base_url), headers, data
 
 
 def _build_provider_request(provider: str, system_prompt: str, user_content: str, max_tokens: int, question_context: OCSQuestionContext) -> tuple[str, Dict[str, str], Dict[str, Any]]:
@@ -745,8 +819,6 @@ def _build_provider_request(provider: str, system_prompt: str, user_content: str
         return _build_openai_chat_request(system_prompt, user_content, max_tokens, question_context)
     if provider == "openai_responses":
         return _build_openai_responses_request(system_prompt, user_content, max_tokens, question_context)
-    if provider == "dashscope":
-        return _build_dashscope_request(system_prompt, user_content, max_tokens, question_context)
     if provider == "anthropic":
         return _build_anthropic_request(system_prompt, user_content, max_tokens, question_context)
     raise ValueError(f"不支持的AI接口类型: {provider}")
@@ -825,6 +897,36 @@ async def query_ai_stream(question_context: OCSQuestionContext) -> AsyncIterator
     try:
         provider = settings.ai_model_provider
         q_type, system_prompt, user_content, max_tokens = _build_ai_prompt(question_context)
+
+        if provider == "dashscope":
+            request_data = _build_dashscope_request_data(
+                system_prompt,
+                user_content,
+                max_tokens,
+                question_context,
+                use_streaming_transport=True
+            )
+            chunks = []
+            async for chunk in _iter_dashscope_sdk_chunks(request_data):
+                chunks.append(chunk)
+                yield _format_sse_event("chunk", {"text": chunk})
+
+            raw_text = "".join(chunks).strip()
+            answer = _extract_answer_text(raw_text, _structured_output_enabled(question_context)).strip()
+            if not answer:
+                logger.warning(f"AI流式返回空答案: provider={provider}, 问题={question_context.title[:50]}...")
+                yield _format_sse_event(
+                    "done",
+                    _build_stream_result_payload(question_context, "", "none", 0.0, q_type, False)
+                )
+                return
+
+            yield _format_sse_event(
+                "done",
+                _build_stream_result_payload(question_context, answer, "ai", 0.8, q_type, True)
+            )
+            return
+
         url, headers, data = _build_provider_request(provider, system_prompt, user_content, max_tokens, question_context)
 
         session = await get_http_session()
@@ -943,61 +1045,85 @@ async def query_ai(question_context: OCSQuestionContext) -> Optional[Dict[str, A
     try:
         provider = settings.ai_model_provider
         q_type, system_prompt, user_content, max_tokens = _build_ai_prompt(question_context)
-        url, headers, data = _build_provider_request(provider, system_prompt, user_content, max_tokens, question_context)
         use_stream = _streaming_enabled(question_context)
         use_streaming_transport = _uses_streaming_transport(provider, question_context)
 
-        thinking_value = _get_thinking_value(question_context)
-        request_max_tokens = _extract_request_max_tokens(provider, data)
-        thinking_payload = _describe_thinking_payload(provider, data)
-        logger.info(
-            f"AI请求: provider={provider}, 模型={settings.AI_MODEL_NAME}, 类型={q_type}, "
-            f"thinking={thinking_value}, thinking_payload={thinking_payload}, "
-            f"max_output_tokens={request_max_tokens}, "
-            f"structured={_structured_output_enabled(question_context)}, stream={use_stream}, transport_stream={use_streaming_transport}"
-        )
-
-        session = await get_http_session()
-        async with session.post(
-            url,
-            headers=headers,
-            json=data,
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"AI API请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}")
-                return None
+        if provider == "dashscope":
+            request_data = _build_dashscope_request_data(
+                system_prompt,
+                user_content,
+                max_tokens,
+                question_context,
+                use_streaming_transport=use_streaming_transport
+            )
+            thinking_value = _get_thinking_value(question_context)
+            request_max_tokens = _extract_request_max_tokens(provider, request_data)
+            thinking_payload = _describe_thinking_payload(provider, request_data)
+            logger.info(
+                f"AI请求: provider={provider}, 模型={settings.AI_MODEL_NAME}, 类型={q_type}, "
+                f"thinking={thinking_value}, thinking_payload={thinking_payload}, "
+                f"max_output_tokens={request_max_tokens}, "
+                f"structured={_structured_output_enabled(question_context)}, stream={use_stream}, transport_stream={use_streaming_transport}"
+            )
 
             if use_streaming_transport:
-                raw_text = await _read_streaming_response(response, provider)
+                raw_text = await _read_dashscope_streaming_response(request_data)
             else:
-                result = await response.json(content_type=None)
+                result = await _call_dashscope_non_stream(request_data)
                 raw_text = _extract_response_text(provider, result)
+        else:
+            url, headers, data = _build_provider_request(provider, system_prompt, user_content, max_tokens, question_context)
+            thinking_value = _get_thinking_value(question_context)
+            request_max_tokens = _extract_request_max_tokens(provider, data)
+            thinking_payload = _describe_thinking_payload(provider, data)
+            logger.info(
+                f"AI请求: provider={provider}, 模型={settings.AI_MODEL_NAME}, 类型={q_type}, "
+                f"thinking={thinking_value}, thinking_payload={thinking_payload}, "
+                f"max_output_tokens={request_max_tokens}, "
+                f"structured={_structured_output_enabled(question_context)}, stream={use_stream}, transport_stream={use_streaming_transport}"
+            )
 
-            answer = _extract_answer_text(raw_text, _structured_output_enabled(question_context)).strip()
-            logger.info(f"AI返回的原始答案: provider={provider}, 类型={q_type}, 答案={answer}")
+            session = await get_http_session()
+            async with session.post(
+                url,
+                headers=headers,
+                json=data,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"AI API请求失败: provider={provider}, 状态码={response.status}, 响应={error_text}")
+                    return None
 
-            if not answer:
-                logger.warning(f"AI返回空答案: provider={provider}, 问题={question_context.title[:50]}...")
-                return None
+                if use_streaming_transport:
+                    raw_text = await _read_streaming_response(response, provider)
+                else:
+                    result = await response.json(content_type=None)
+                    raw_text = _extract_response_text(provider, result)
 
-            return {
-                "question": question_context.title,
+        answer = _extract_answer_text(raw_text, _structured_output_enabled(question_context)).strip()
+        logger.info(f"AI返回的原始答案: provider={provider}, 类型={q_type}, 答案={answer}")
+
+        if not answer:
+            logger.warning(f"AI返回空答案: provider={provider}, 问题={question_context.title[:50]}...")
+            return None
+
+        return {
+            "question": question_context.title,
+            "question_type": q_type,
+            "options": question_context.options or "",
+            "answer": answer,
+            "source": "ai",
+            "confidence": 0.8,
+            "metadata": {
+                "provider": provider,
+                "model": settings.AI_MODEL_NAME,
                 "question_type": q_type,
-                "options": question_context.options or "",
-                "answer": answer,
-                "source": "ai",
-                "confidence": 0.8,
-                "metadata": {
-                    "provider": provider,
-                    "model": settings.AI_MODEL_NAME,
-                    "question_type": q_type,
-                    "thinking": thinking_value,
-                    "structured_output": _structured_output_enabled(question_context),
-                    "stream": use_stream
-                }
+                "thinking": thinking_value,
+                "structured_output": _structured_output_enabled(question_context),
+                "stream": use_stream
             }
+        }
     except Exception as e:
         logger.error(f"AI查询出错: {e}")
         return None
