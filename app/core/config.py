@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     AI_MODEL_API_KEY: str = ""
     AI_MODEL_BASE_URL: str = ""  # 可选；OpenAI/Anthropic 未配置时使用各自默认基础地址，DashScope 留空时交给 SDK 默认地址
     AI_ENABLE_THINKING_PARAMS: Optional[bool] = None  # None=不转发；true/false=默认向上游显式传递思考开启/关闭
+    AI_REASONING_EFFORT: Optional[str] = None  # OpenAI 系 provider 的 reasoning_effort 值，不配置则不转发；配置后按配置值转发（如 high/low/medium/max/xhigh 等）
     AI_ENABLE_STRUCTURED_OUTPUT_PARAMS: bool = False  # 允许向上游转发结构化输出参数
     AI_ENABLE_STREAMING_PARAMS: bool = False  # 允许向上游转发流式参数并启用 SSE 返回
     AI_MAX_OUTPUT_TOKENS: int = 1000  # 默认模型输出 token 上限

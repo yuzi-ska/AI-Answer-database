@@ -55,11 +55,13 @@ AI_MAX_OUTPUT_TOKENS=1000
 # - 不配置 AI_ENABLE_THINKING_PARAMS：不向上游转发 thinking / thinking_budget
 # - 配置为 true/false：未传 thinking 时使用该 env 作为默认值；请求显式传参时优先用请求值
 # - 各 provider 的转发字段不同：
-#   - openai_chat_completions -> reasoning_effort=high|none
-#   - openai_responses -> reasoning.effort=high|none
+#   - openai_chat_completions -> reasoning_effort=<AI_REASONING_EFFORT 的值>
+#   - openai_responses -> reasoning.effort=<AI_REASONING_EFFORT 的值>
 #   - dashscope -> enable_thinking=True|False（SDK kwargs）
 #   - anthropic -> thinking={type: "enabled"|"disabled"}（thinking_budget 仅在 enabled 时使用）
 AI_ENABLE_THINKING_PARAMS=false
+# OpenAI 系 provider 在 thinking=true 时使用的 reasoning_effort 值，不配置则默认 high
+# AI_REASONING_EFFORT=high
 # 以下开关默认关闭；只有显式设为 true 且请求显式传参时，才会转发到上游接口
 AI_ENABLE_STRUCTURED_OUTPUT_PARAMS=false
 AI_ENABLE_STREAMING_PARAMS=false
@@ -118,8 +120,8 @@ RESPONSE_CODE_ERROR=0
 
 provider 对应的 thinking 转发字段如下：
 
-- OpenAI Chat Completions：`reasoning_effort=high|none`
-- OpenAI Responses：`reasoning.effort=high|none`
+- OpenAI Chat Completions：`reasoning_effort=<AI_REASONING_EFFORT 值，默认 high>`
+- OpenAI Responses：`reasoning.effort=<AI_REASONING_EFFORT 值，默认 high>`
 - DashScope SDK：`enable_thinking=True|False`
 - Anthropic Claude：`thinking={type: "enabled", budget_tokens: ...}` 或 `thinking={type: "disabled"}`
 

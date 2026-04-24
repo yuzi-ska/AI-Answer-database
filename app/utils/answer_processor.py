@@ -301,20 +301,31 @@ def _openai_responses_endpoint(base_url: str) -> str:
     return _join_url(base_url, "responses")
 
 
+def _get_reasoning_effort() -> str:
+    configured = settings.AI_REASONING_EFFORT
+    if configured and configured.strip():
+        return configured.strip()
+    return "high"
+
+
 def _apply_openai_chat_thinking_settings(data: Dict[str, Any], question_context: OCSQuestionContext) -> str:
     thinking_value = _get_thinking_value(question_context)
     if thinking_value is None:
         return "not_forwarded"
-    data["reasoning_effort"] = "high" if thinking_value else "none"
-    return "enabled" if thinking_value else "disabled"
+    if not thinking_value:
+        return "disabled"
+    data["reasoning_effort"] = _get_reasoning_effort()
+    return "enabled"
 
 
 def _apply_openai_responses_thinking_settings(data: Dict[str, Any], question_context: OCSQuestionContext) -> str:
     thinking_value = _get_thinking_value(question_context)
     if thinking_value is None:
         return "not_forwarded"
-    data["reasoning"] = {"effort": "high" if thinking_value else "none"}
-    return "enabled" if thinking_value else "disabled"
+    if not thinking_value:
+        return "disabled"
+    data["reasoning"] = {"effort": _get_reasoning_effort()}
+    return "enabled"
 
 
 def _apply_dashscope_thinking_settings(parameters: Dict[str, Any], question_context: OCSQuestionContext) -> str:
