@@ -713,7 +713,18 @@ def _build_ai_prompt(question_context: OCSQuestionContext) -> tuple[str, str, st
     max_tokens = _get_max_output_tokens()
 
     if q_type == "completion":
-        system_prompt = "你是OCS网课助手AI答题系统。这是一道填空题，请直接回答填空处的内容，不要进行任何解释或讲解。不要返回选项字母，只返回填空的答案内容。"
+        system_prompt = (
+            "你是OCS网课助手AI答题系统。这是一道填空题，请按题目中需要填写的空的顺序，"
+            "依次给出每个空的答案。\n"
+            "严格遵守以下输出格式要求：\n"
+            "1. 只输出答案本身，不要输出题干、解释、推理过程或任何前缀（如「答案：」「第一空：」「1.」等）。\n"
+            "2. 单空题：直接返回该空的答案文本，不要包含分隔符。\n"
+            "3. 多空题（题目中包含两个及以上的空，例如多个下划线、（ ）、括号、或题干明确要求多处填写）："
+            "必须将每个空的答案用英文井号 # 严格分隔，按题目从前到后的顺序排列；"
+            "空与空之间除 # 外不要插入任何其它字符（不要空格、顿号、换行、序号）。\n"
+            "4. 不要返回选项字母，不要返回 Markdown，不要返回 JSON，不要返回整段连贯的话。\n"
+            "示例：单空答案 → 北京；三空答案 → 北京#上海#广州。"
+        )
         user_content = f"【填空题】问题：{question_context.title}"
         if question_context.options:
             user_content += f"\n参考选项：{question_context.options}"
@@ -727,7 +738,13 @@ def _build_ai_prompt(question_context: OCSQuestionContext) -> tuple[str, str, st
         system_prompt = "你是OCS网课助手AI答题系统。这是一道判断题，请直接回答'对'或'错'。只返回一个字，不要有任何解释。"
         user_content = f"【判断题】问题：{question_context.title}"
     else:
-        system_prompt = "你是OCS网课助手AI答题系统。请根据题目类型回答问题。如果是填空题，只返回填空内容；如果是选择题，只返回选项字母；如果是判断题，只回答'对'或'错'。"
+        system_prompt = (
+            "你是OCS网课助手AI答题系统。请根据题目类型回答问题。"
+            "如果是填空题：单空直接返回答案内容；多空则按顺序用英文井号 # 严格分隔每个空的答案（如：北京#上海#广州），"
+            "不要输出题干、解释或前缀。"
+            "如果是选择题，只返回选项字母（多选用 # 连接，如 A#B#C）；"
+            "如果是判断题，只回答'对'或'错'。"
+        )
         user_content = f"问题：{question_context.title}"
         if question_context.options:
             user_content += f"\n选项：{question_context.options}"
